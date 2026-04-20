@@ -1,0 +1,41 @@
+# ── Build artifacts ────────────────────────────────────────────────────────
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+
+# Go test / coverage
+*.test
+*.out
+coverage.*
+*.prof
+
+# ── llama.cpp build outputs (do NOT commit compiled artifacts) ─────────────
+llama.cpp/build/
+llama.cpp/build-*/
+llama.cpp/CMakeCache.txt
+llama.cpp/CMakeFiles/
+
+# ── Models (never commit .gguf — too large) ────────────────────────────────
+*.gguf
+models/
+
+# ── Go workspaces & env ────────────────────────────────────────────────────
+go.work
+go.work.sum
+.env
+.env.local
+
+# ── IDE / OS ───────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+*.swp
+*.swo
+.vscode/settings.json
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+logs/
