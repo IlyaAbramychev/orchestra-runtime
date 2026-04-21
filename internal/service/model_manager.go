@@ -344,6 +344,12 @@ func deriveModelName(rootDir, fullPath, filename string) string {
 }
 
 // LoadModel loads a model into the engine.
+//
+// Safety net: on unified-memory systems (Apple Silicon, CPU-only) a load that
+// would exceed available RAM causes swap-thrash and can hang the OS requiring
+// a hard reboot. We refuse such loads unless caller explicitly bypasses via
+// ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1. This is a backstop for the UI check;
+// external HTTP clients and older extensions are also protected.
 func (m *ModelManager) LoadModel(id string, gpuLayers, ctxSize, threads int) error {
 	entry := m.registry.Get(id)
 	if entry == nil {
@@ -351,6 +357,34 @@ func (m *ModelManager) LoadModel(id string, gpuLayers, ctxSize, threads int) err
 	}
 	if entry.Status != "ready" && entry.Status != "loaded" {
 		return fmt.Errorf("model %s is not ready (status: %s)", id, entry.Status)
+	}
+
+	// Stat the file for its on-disk size; gguf mmap occupies roughly that
+	// many bytes of RAM at inference time.
+	if os.Getenv("ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT") != "1" {
+		if st, err := os.Stat(entry.FilePath); err == nil {
+			modelBytes := st.Size()
+			// Conservative KV estimate: 0.2 MB/token (covers most 8B-32B GQA
+			// models). Smaller than UI's tiered estimate but good enough as a
+			// safety floor.
+			kvBytes := int64(ctxSize) * 200 * 1024
+			avail := getAvailableRAM()
+			// Keep at least 2 GB headroom for the OS so userspace doesn't die.
+			const headroom int64 = 2 * 1024 * 1024 * 1024
+			budget := avail - headroom
+			needed := modelBytes + kvBytes
+			if budget > 0 && needed > budget {
+				return fmt.Errorf(
+					"load would exceed available RAM: model %.1f GB + KV ~%.1f GB = %.1f GB, "+
+						"available %.1f GB (reserved 2 GB for OS). "+
+						"Close other apps, lower n_ctx, or set ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1 to bypass.",
+					float64(modelBytes)/1024/1024/1024,
+					float64(kvBytes)/1024/1024/1024,
+					float64(needed)/1024/1024/1024,
+					float64(avail)/1024/1024/1024,
+				)
+			}
+		}
 	}
 
 	return m.engine.LoadModel(id, entry.FilePath, gpuLayers, ctxSize, threads)

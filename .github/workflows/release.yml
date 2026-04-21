@@ -1,0 +1,175 @@
+name: Release
+
+# Trigger: push a tag like `v0.2.0` → builds all platform binaries in parallel,
+# attaches them to the GitHub Release by that tag. The Operium Orchestra
+# VS Code extension polls /releases/latest and pulls assets by exact name.
+#
+# Required artifact names (must match _runtimeAssetName() in the extension):
+#   orchestra-runtime-darwin-arm64    (Apple Silicon, Metal + Accelerate)
+#   orchestra-runtime-darwin-x64      (Intel Mac, CPU + Accelerate)
+#   orchestra-runtime-linux-x64       (Linux glibc, CPU only)
+#   orchestra-runtime-win32-x64.exe   (Windows, CPU only, built with MinGW)
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow manual dispatch for dry-runs without tagging.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.2.0). Leave blank for a dry-run artifact."
+        required: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to create/update a Release and upload assets
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-arm64
+            runner: macos-14            # ARM64 runner
+            goos: darwin
+            goarch: arm64
+            make_target: build-metal
+            artifact: orchestra-runtime-darwin-arm64
+          - name: darwin-x64
+            runner: macos-13            # Intel runner (still available on GHA)
+            goos: darwin
+            goarch: amd64
+            make_target: build-cpu
+            artifact: orchestra-runtime-darwin-x64
+          - name: linux-x64
+            runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            make_target: build-cpu
+            artifact: orchestra-runtime-linux-x64
+          - name: win32-x64
+            runner: windows-2022
+            goos: windows
+            goarch: amd64
+            make_target: build-cpu
+            artifact: orchestra-runtime-win32-x64.exe
+
+    steps:
+      - name: Checkout (with llama.cpp submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Install build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Install build deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # cmake + clang already preinstalled on GitHub runners;
+          # this is a no-op guard so the step is explicit.
+          cmake --version
+
+      - name: Install build deps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # GitHub's windows-2022 ships MSYS2 + MinGW64; make sure they're on PATH.
+          # `cmake` and `mingw32-make` come with the image.
+          cmake --version
+          where.exe gcc
+          where.exe mingw32-make
+
+      - name: Derive version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Build (Windows — MinGW)
+        if: runner.os == 'Windows'
+        shell: bash
+        # `make` is GNU Make provided by MSYS; works fine with our Makefile.
+        # CGo on Windows defaults to MinGW-w64 which is what llama.cpp expects
+        # for our static-linked build.
+        run: |
+          mingw32-make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Rename binary for release
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp bin/orchestra-runtime.exe bin/${{ matrix.artifact }}
+          else
+            cp bin/orchestra-runtime bin/${{ matrix.artifact }}
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: bin/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten paths
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -maxdepth 2 -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Compute SHA256 checksums
+        run: |
+          cd release-assets
+          for f in *; do
+            shasum -a 256 "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

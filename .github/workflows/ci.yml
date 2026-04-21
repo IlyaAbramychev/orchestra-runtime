@@ -1,0 +1,70 @@
+name: CI
+
+# Runs on every push and PR. Does NOT produce release artifacts — just catches
+# compile breaks and `go vet` regressions before we tag.
+#
+# Skips building llama.cpp on non-macOS runners because it's slow; for CPU-only
+# we rely on `go vet` which doesn't need the native libs (CGo code still type-
+# checks via generated cgo wrappers).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go build (syntax only, skips cgo link)
+        # Use `-tags=nocgo` pattern if/when engine gets a stub; for now we skip
+        # the cgo packages and only verify pure-Go modules parse.
+        run: |
+          go build ./internal/config/... \
+                    ./internal/server/... \
+                    ./internal/handler/... \
+                    ./internal/service/... \
+                    ./internal/model/... \
+                    ./internal/storage/... \
+                    ./internal/middleware/...
+
+  build-smoke:
+    # One full CGo build as a smoke test — on macOS ARM where it's fastest.
+    # Tag-triggered release workflow does the full matrix.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: make build-metal
+        run: make build-metal VERSION=ci
+      - name: Sanity start
+        # Boot the binary, confirm /health responds, kill it. Ensures the
+        # binary was properly linked and can serve HTTP.
+        run: |
+          ORCHESTRA_PORT=8101 ./bin/orchestra-runtime &
+          PID=$!
+          sleep 2
+          curl -fsS http://localhost:8101/health
+          curl -fsS http://localhost:8101/api/tags
+          kill $PID || true

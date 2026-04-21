@@ -189,6 +189,122 @@ func (h *ModelsHandler) Status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// ListOllamaTags handles GET /api/tags (Ollama-compat).
+// Docs: https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models
+func (h *ModelsHandler) ListOllamaTags(w http.ResponseWriter, r *http.Request) {
+	entries := h.manager.List()
+	type ollamaDetails struct {
+		Format            string   `json:"format"`
+		Family            string   `json:"family"`
+		Families          []string `json:"families,omitempty"`
+		ParameterSize     string   `json:"parameter_size,omitempty"`
+		QuantizationLevel string   `json:"quantization_level,omitempty"`
+	}
+	type ollamaTag struct {
+		Name       string        `json:"name"`
+		Model      string        `json:"model"`
+		ModifiedAt string        `json:"modified_at"`
+		Size       int64         `json:"size"`
+		Digest     string        `json:"digest,omitempty"`
+		Details    ollamaDetails `json:"details"`
+	}
+	tags := make([]ollamaTag, 0, len(entries))
+	for _, e := range entries {
+		if e.Status != "ready" && e.Status != "loaded" {
+			continue
+		}
+		tags = append(tags, ollamaTag{
+			Name:       e.Name,
+			Model:      e.Name,
+			ModifiedAt: e.DownloadedAt.UTC().Format("2006-01-02T15:04:05.999999999Z"),
+			Size:       e.Size,
+			Digest:     e.SHA256,
+			Details: ollamaDetails{
+				Format:            "gguf",
+				Family:            e.Family,
+				ParameterSize:     e.Parameters,
+				QuantizationLevel: e.Quantization,
+			},
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": tags})
+}
+
+// ListRunning handles GET /api/ps (Ollama-compat) — shows currently-loaded models.
+func (h *ModelsHandler) ListRunning(w http.ResponseWriter, r *http.Request) {
+	id := h.engine.LoadedModelID()
+	type running struct {
+		Name      string `json:"name"`
+		Model     string `json:"model"`
+		Size      int64  `json:"size"`
+		SizeVRAM  int64  `json:"size_vram"`
+		ExpiresAt string `json:"expires_at,omitempty"`
+	}
+	items := []running{}
+	if id != "" {
+		if e := h.manager.Get(id); e != nil {
+			items = append(items, running{
+				Name:     e.Name,
+				Model:    e.Name,
+				Size:     e.Size,
+				SizeVRAM: e.Size, // runtime doesn't separate; report as same
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": items})
+}
+
+// Show handles POST /api/show (Ollama-compat) — model metadata.
+func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model string `json:"model"`
+		Name  string `json:"name"` // alias
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	id := req.Model
+	if id == "" {
+		id = req.Name
+	}
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	entry := h.manager.Get(id)
+	if entry == nil {
+		// Also try by name — client side usually sends display name, we store by id.
+		for _, e := range h.manager.List() {
+			if e.Name == id {
+				entry = e
+				break
+			}
+		}
+	}
+	if entry == nil {
+		writeError(w, http.StatusNotFound, "model not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"modelfile":  "", // placeholder — we don't support Modelfile yet
+		"parameters": "", // future: surface load-time params
+		"template":   "", // future: surface chat template
+		"details": map[string]any{
+			"format":             "gguf",
+			"family":             entry.Family,
+			"parameter_size":     entry.Parameters,
+			"quantization_level": entry.Quantization,
+		},
+		"model_info": map[string]any{
+			"general.name":        entry.Name,
+			"general.size_bytes":  entry.Size,
+			"general.file_path":   entry.FilePath,
+			"general.sha256":      entry.SHA256,
+		},
+	})
+}
+
 func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
 	return model.ModelInfo{
 		ID:           e.ID,

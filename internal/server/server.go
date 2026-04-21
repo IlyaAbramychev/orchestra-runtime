@@ -38,6 +38,10 @@ func (s *Server) Start() error {
 	// Initialize engine
 	s.eng = engine.New()
 	s.eng.InitBackend()
+	s.eng.SetIdleTimeout(s.cfg.IdleTimeout)
+	if s.cfg.IdleTimeout > 0 {
+		slog.Info("idle auto-unload enabled", "timeout", s.cfg.IdleTimeout)
+	}
 
 	// Initialize storage
 	registry, err := storage.NewModelRegistry(s.cfg.ModelsDir)
@@ -50,14 +54,18 @@ func (s *Server) Start() error {
 	inferSvc := service.NewInferenceService(s.eng, s.cfg.MaxQueueSize)
 	sysInfo := service.NewSystemInfo(s.eng)
 
+	embedSvc := service.NewEmbeddingService(s.eng, inferSvc)
+
 	// Initialize handlers
 	chatH := handler.NewChatHandler(inferSvc)
+	genH := handler.NewGenerateHandler(inferSvc)
+	embH := handler.NewEmbedHandler(embedSvc, inferSvc)
 	modelsH := handler.NewModelsHandler(modelMgr, s.eng)
 	systemH := handler.NewSystemHandler(sysInfo)
 	systemH.SetInference(inferSvc)
 
 	// Build router
-	s.router = s.buildRouter(chatH, modelsH, systemH)
+	s.router = s.buildRouter(chatH, genH, embH, modelsH, systemH)
 
 	addr := fmt.Sprintf(":%s", s.cfg.Port)
 	slog.Info("starting Orchestra Runtime", "addr", addr, "models_dir", s.cfg.ModelsDir)
@@ -73,7 +81,13 @@ func (s *Server) Start() error {
 	return s.httpServer.ListenAndServe()
 }
 
-func (s *Server) buildRouter(chatH *handler.ChatHandler, modelsH *handler.ModelsHandler, systemH *handler.SystemHandler) *chi.Mux {
+func (s *Server) buildRouter(
+	chatH *handler.ChatHandler,
+	genH *handler.GenerateHandler,
+	embH *handler.EmbedHandler,
+	modelsH *handler.ModelsHandler,
+	systemH *handler.SystemHandler,
+) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -99,7 +113,18 @@ func (s *Server) buildRouter(chatH *handler.ChatHandler, modelsH *handler.Models
 
 		// OpenAI-compatible endpoints
 		r.Post("/v1/chat/completions", chatH.ChatCompletion)
+		r.Post("/v1/completions", genH.Generate) // OpenAI legacy completions → Ollama-style raw prompt
+		r.Post("/v1/embeddings", embH.EmbedOpenAI)
 		r.Get("/v1/models", modelsH.ListOpenAI)
+
+		// Ollama-compatible endpoints
+		r.Post("/api/chat", chatH.ChatCompletion)
+		r.Post("/api/generate", genH.Generate)
+		r.Post("/api/embed", embH.Embed)
+		r.Post("/api/embeddings", embH.Embed) // legacy Ollama alias
+		r.Get("/api/tags", modelsH.ListOllamaTags)
+		r.Get("/api/ps", modelsH.ListRunning)
+		r.Post("/api/show", modelsH.Show)
 
 		// Model management
 		r.Route("/api/models", func(r chi.Router) {

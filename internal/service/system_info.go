@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/model"
@@ -12,28 +14,61 @@ import (
 
 const version = "0.1.0"
 
+// Cached hardware sample — avoid spawning `vm_stat` / `nvidia-smi` on every
+// /api/system call (they're fork-heavy and get spammy under load).
+type hwSample struct {
+	totalRAM     int64
+	availableRAM int64
+	gpu          *model.GPUInfo
+	sampledAt    time.Time
+}
+
 type SystemInfo struct {
 	engine *engine.Engine
+
+	hwMu     sync.Mutex
+	hwCache  hwSample
+	hwMaxAge time.Duration
 }
 
 func NewSystemInfo(eng *engine.Engine) *SystemInfo {
-	return &SystemInfo{engine: eng}
+	return &SystemInfo{
+		engine:   eng,
+		hwMaxAge: 5 * time.Second,
+	}
+}
+
+// hardware returns a lightly-cached hardware snapshot.
+func (s *SystemInfo) hardware() (int64, int64, *model.GPUInfo) {
+	s.hwMu.Lock()
+	defer s.hwMu.Unlock()
+	if time.Since(s.hwCache.sampledAt) < s.hwMaxAge && s.hwCache.totalRAM > 0 {
+		return s.hwCache.totalRAM, s.hwCache.availableRAM, s.hwCache.gpu
+	}
+	s.hwCache = hwSample{
+		totalRAM:     getTotalRAM(),
+		availableRAM: getAvailableRAM(),
+		gpu:          detectGPU(),
+		sampledAt:    time.Now(),
+	}
+	return s.hwCache.totalRAM, s.hwCache.availableRAM, s.hwCache.gpu
 }
 
 func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
+	totalRAM, availableRAM, gpu := s.hardware()
 	info := &model.SystemInfoResponse{
-		Service:     "orchestra-runtime",
-		Version:     version,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		CPUCount:    runtime.NumCPU(),
-		EngineState: s.engine.State(),
-		QueueDepth:  queueDepth,
+		Service:            "orchestra-runtime",
+		Version:            version,
+		OS:                 runtime.GOOS,
+		Arch:               runtime.GOARCH,
+		CPUCount:           runtime.NumCPU(),
+		EngineState:        s.engine.State(),
+		QueueDepth:         queueDepth,
+		IdleTimeoutSeconds: int(s.engine.IdleTimeout().Seconds()),
+		TotalRAM:           totalRAM,
+		AvailableRAM:       availableRAM,
+		GPU:                gpu,
 	}
-
-	info.TotalRAM = getTotalRAM()
-	info.AvailableRAM = getAvailableRAM()
-	info.GPU = detectGPU()
 
 	if id := s.engine.LoadedModelID(); id != "" {
 		info.CurrentModel = &id

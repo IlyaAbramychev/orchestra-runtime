@@ -20,6 +20,9 @@ type Config struct {
 	ShutdownTimeout  time.Duration
 	APIKey           string
 	LogLevel         string
+	// IdleTimeout: auto-unload the model after this duration without use.
+	// Zero disables the watcher. Inspired by Ollama's OLLAMA_KEEP_ALIVE.
+	IdleTimeout time.Duration
 }
 
 func Load() *Config {
@@ -46,6 +49,9 @@ func Load() *Config {
 		ShutdownTimeout:  time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", 30)) * time.Second,
 		APIKey:           getEnv("ORCHESTRA_API_KEY", ""),
 		LogLevel:         getEnv("LOG_LEVEL", "info"),
+		// 10 min default — same as Ollama's default KEEP_ALIVE.
+		// Set ORCHESTRA_IDLE_TIMEOUT_SECONDS=0 to disable.
+		IdleTimeout: time.Duration(getEnvInt("ORCHESTRA_IDLE_TIMEOUT_SECONDS", 600)) * time.Second,
 	}
 }
 

@@ -49,6 +49,10 @@ func (h *ChatHandler) handleComplete(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
+	// Apply per-request keep_alive after generation — clients expect immediate
+	// response; unload happens on the next engine tick.
+	h.inference.ApplyKeepAlive(req.KeepAlive)
+
 	resp := model.ChatCompletionResponse{
 		ID:      "chatcmpl-" + uuid.New().String()[:8],
 		Object:  "chat.completion",
@@ -68,6 +72,13 @@ func (h *ChatHandler) handleComplete(w http.ResponseWriter, r *http.Request, req
 			PromptTokens:     result.PromptTokens,
 			CompletionTokens: result.CompletionTokens,
 			TotalTokens:      result.PromptTokens + result.CompletionTokens,
+		},
+		Timings: &model.Timings{
+			TotalDurationNs:      result.Timings.TotalNs,
+			PromptEvalDurationNs: result.Timings.PromptEvalNs,
+			PromptEvalCount:      result.PromptTokens,
+			EvalDurationNs:       result.Timings.EvalNs,
+			EvalCount:            result.CompletionTokens,
 		},
 	}
 
@@ -118,6 +129,18 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *
 						FinishReason: &chunk.FinishReason,
 					},
 				},
+				Usage: &model.Usage{
+					PromptTokens:     chunk.PromptTokens,
+					CompletionTokens: chunk.CompletionTokens,
+					TotalTokens:      chunk.PromptTokens + chunk.CompletionTokens,
+				},
+				Timings: &model.Timings{
+					TotalDurationNs:      chunk.Timings.TotalNs,
+					PromptEvalDurationNs: chunk.Timings.PromptEvalNs,
+					PromptEvalCount:      chunk.PromptTokens,
+					EvalDurationNs:       chunk.Timings.EvalNs,
+					EvalCount:            chunk.CompletionTokens,
+				},
 			}
 		} else {
 			sseChunk = model.ChatCompletionChunk{
@@ -148,4 +171,7 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *
 
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+
+	// Apply per-request keep_alive after the stream closes.
+	h.inference.ApplyKeepAlive(req.KeepAlive)
 }

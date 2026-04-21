@@ -78,6 +78,12 @@ func (m *llamaModel) NCtxTrain() int {
 	return int(C.llama_model_n_ctx_train(m.ptr))
 }
 
+// NEmbd returns the embedding dimension (hidden size). Used to size embedding
+// result vectors.
+func (m *llamaModel) NEmbd() int {
+	return int(C.llama_model_n_embd(m.ptr))
+}
+
 // --- Vocab ---
 
 type llamaVocab struct {
@@ -187,6 +193,41 @@ func (c *llamaContext) ClearKVCache() {
 	}
 }
 
+// SetEmbeddings toggles the context into embedding extraction mode. When true,
+// `llama_decode` populates per-sequence embedding buffers instead of logits.
+// We flip it only during Embed() and flip back after — chat contexts stay in
+// logits mode by default.
+func (c *llamaContext) SetEmbeddings(on bool) {
+	C.llama_set_embeddings(c.ptr, C.bool(on))
+}
+
+// EmbeddingsSeq returns the pooled embedding for sequence `seqID`. Valid only
+// after a `decode` with an embedding-mode batch. Caller must copy out before
+// running another decode — the underlying buffer is owned by llama.cpp.
+func (c *llamaContext) EmbeddingsSeq(seqID int, nEmbd int) []float32 {
+	ptr := C.llama_get_embeddings_seq(c.ptr, C.llama_seq_id(seqID))
+	if ptr == nil {
+		return nil
+	}
+	src := unsafe.Slice((*float32)(unsafe.Pointer(ptr)), nEmbd)
+	out := make([]float32, nEmbd)
+	copy(out, src)
+	return out
+}
+
+// EmbeddingsAll returns the embedding for a non-pooled context (pooling_type=NONE)
+// at position `i`. Used when the model doesn't auto-pool.
+func (c *llamaContext) EmbeddingsIth(i int, nEmbd int) []float32 {
+	ptr := C.llama_get_embeddings_ith(c.ptr, C.int32_t(i))
+	if ptr == nil {
+		return nil
+	}
+	src := unsafe.Slice((*float32)(unsafe.Pointer(ptr)), nEmbd)
+	out := make([]float32, nEmbd)
+	copy(out, src)
+	return out
+}
+
 // --- Batch ---
 
 type llamaBatch struct {
@@ -245,21 +286,92 @@ type llamaSampler struct {
 	ptr *C.struct_llama_sampler
 }
 
-// NewSamplerChain creates a sampler chain with temperature, top-k, top-p, and dist sampling.
-func NewSamplerChain(temp float32, topK int, topP float32, seed uint32) *llamaSampler {
+// SamplerOpts bundles all knobs exposed in the public sampling panel. Nil
+// fields fall back to their “disabled” value (e.g. top_k=0 means no truncate).
+type SamplerOpts struct {
+	Temp             float32
+	TopK             int
+	TopP             float32
+	MinP             float32
+	TypicalP         float32
+	RepeatPenalty    float32
+	RepeatLastN      int
+	FrequencyPenalty float32
+	PresencePenalty  float32
+	Mirostat         int // 0 off, 1 v1, 2 v2
+	MirostatTau      float32
+	MirostatEta      float32
+	Seed             uint32
+	NVocab           int32 // required for penalty samplers
+}
+
+// NewSamplerChain composes the full llama.cpp sampler chain. Order matters:
+// repetition penalties → truncation (top_k/top_p/min_p/typical) → temperature
+// → mirostat (or dist). See llama.cpp/examples/main/main.cpp for reference.
+func NewSamplerChain(o SamplerOpts) *llamaSampler {
 	chainParams := C.llama_sampler_chain_default_params()
 	chain := C.llama_sampler_chain_init(chainParams)
 
-	if topK > 0 {
-		C.llama_sampler_chain_add(chain, C.llama_sampler_init_top_k(C.int32_t(topK)))
+	// Repetition controls: only add if any is non-default — cheap but not free.
+	if (o.RepeatPenalty > 0 && o.RepeatPenalty != 1.0) || o.FrequencyPenalty != 0 || o.PresencePenalty != 0 {
+		last := o.RepeatLastN
+		if last == 0 {
+			last = 64
+		}
+		rp := o.RepeatPenalty
+		if rp == 0 {
+			rp = 1.0
+		}
+		C.llama_sampler_chain_add(chain, C.llama_sampler_init_penalties(
+			C.int32_t(last),
+			C.float(rp),
+			C.float(o.FrequencyPenalty),
+			C.float(o.PresencePenalty),
+		))
 	}
-	if topP > 0 && topP < 1.0 {
-		C.llama_sampler_chain_add(chain, C.llama_sampler_init_top_p(C.float(topP), 1))
+
+	// Mirostat replaces top_k/top_p entirely — skip truncation if enabled.
+	if o.Mirostat == 1 {
+		tau := o.MirostatTau
+		if tau == 0 {
+			tau = 5.0
+		}
+		eta := o.MirostatEta
+		if eta == 0 {
+			eta = 0.1
+		}
+		C.llama_sampler_chain_add(chain,
+			C.llama_sampler_init_mirostat(C.int32_t(o.NVocab), C.uint32_t(o.Seed), C.float(tau), C.float(eta), 100))
+	} else if o.Mirostat == 2 {
+		tau := o.MirostatTau
+		if tau == 0 {
+			tau = 5.0
+		}
+		eta := o.MirostatEta
+		if eta == 0 {
+			eta = 0.1
+		}
+		C.llama_sampler_chain_add(chain,
+			C.llama_sampler_init_mirostat_v2(C.uint32_t(o.Seed), C.float(tau), C.float(eta)))
+	} else {
+		// Standard truncation stack.
+		if o.TopK > 0 {
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_top_k(C.int32_t(o.TopK)))
+		}
+		if o.TypicalP > 0 && o.TypicalP < 1.0 {
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_typical(C.float(o.TypicalP), 1))
+		}
+		if o.TopP > 0 && o.TopP < 1.0 {
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_top_p(C.float(o.TopP), 1))
+		}
+		if o.MinP > 0 {
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_min_p(C.float(o.MinP), 1))
+		}
+		if o.Temp > 0 {
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_temp(C.float(o.Temp)))
+		}
+		C.llama_sampler_chain_add(chain, C.llama_sampler_init_dist(C.uint32_t(o.Seed)))
 	}
-	if temp > 0 {
-		C.llama_sampler_chain_add(chain, C.llama_sampler_init_temp(C.float(temp)))
-	}
-	C.llama_sampler_chain_add(chain, C.llama_sampler_init_dist(C.uint32_t(seed)))
 
 	return &llamaSampler{ptr: chain}
 }
