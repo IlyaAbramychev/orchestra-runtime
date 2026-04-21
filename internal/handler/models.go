@@ -13,10 +13,10 @@ import (
 
 type ModelsHandler struct {
 	manager *service.ModelManager
-	engine  *engine.Engine
+	engine  engine.Backend
 }
 
-func NewModelsHandler(manager *service.ModelManager, eng *engine.Engine) *ModelsHandler {
+func NewModelsHandler(manager *service.ModelManager, eng engine.Backend) *ModelsHandler {
 	return &ModelsHandler{manager: manager, engine: eng}
 }
 

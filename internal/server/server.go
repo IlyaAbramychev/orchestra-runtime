@@ -17,13 +17,16 @@ import (
 	mw "github.com/operium/orchestra-runtime/internal/middleware"
 	"github.com/operium/orchestra-runtime/internal/service"
 	"github.com/operium/orchestra-runtime/internal/storage"
+	"github.com/operium/orchestra-runtime/internal/supervisor"
 )
 
 type Server struct {
 	cfg        *config.Config
 	router     *chi.Mux
 	httpServer *http.Server
-	eng        *engine.Engine
+	backend    engine.Backend
+	// Retained so Shutdown can call Close on the right owner.
+	ownsEngine bool
 }
 
 func New(cfg *config.Config) *Server {
@@ -35,10 +38,30 @@ func (s *Server) Start() error {
 		Level: parseLogLevel(s.cfg.LogLevel),
 	})))
 
-	// Initialize engine
-	s.eng = engine.New()
-	s.eng.InitBackend()
-	s.eng.SetIdleTimeout(s.cfg.IdleTimeout)
+	// Pick the inference backend. Subprocess mode isolates llama.cpp in a
+	// worker — a native crash no longer kills the host. In-process is the
+	// default for now (lower latency, one fewer binary to ship), with a
+	// feature flag to opt in during the rollout.
+	//   ORCHESTRA_USE_SUBPROCESS=1 → out-of-process worker
+	//   (unset / "0")              → in-process (CGo in host)
+	if os.Getenv("ORCHESTRA_USE_SUBPROCESS") == "1" {
+		workerBin := os.Getenv("ORCHESTRA_WORKER_BINARY")
+		w := supervisor.NewWorker(supervisor.Options{
+			WorkerBinary: workerBin,
+		})
+		s.backend = supervisor.NewRemote(w)
+		slog.Info("inference backend: subprocess (worker)",
+			"binary", workerBin,
+		)
+		// Lazy spawn — worker starts on first LoadModel.
+	} else {
+		eng := engine.New()
+		eng.InitBackend()
+		s.backend = eng
+		s.ownsEngine = true
+		slog.Info("inference backend: in-process")
+	}
+	s.backend.SetIdleTimeout(s.cfg.IdleTimeout)
 	if s.cfg.IdleTimeout > 0 {
 		slog.Info("idle auto-unload enabled", "timeout", s.cfg.IdleTimeout)
 	}
@@ -50,17 +73,17 @@ func (s *Server) Start() error {
 	}
 
 	// Initialize services
-	modelMgr := service.NewModelManager(registry, s.eng, s.cfg.ModelsDir)
-	inferSvc := service.NewInferenceService(s.eng, s.cfg.MaxQueueSize)
-	sysInfo := service.NewSystemInfo(s.eng)
+	modelMgr := service.NewModelManager(registry, s.backend, s.cfg.ModelsDir)
+	inferSvc := service.NewInferenceService(s.backend, s.cfg.MaxQueueSize)
+	sysInfo := service.NewSystemInfo(s.backend)
 
-	embedSvc := service.NewEmbeddingService(s.eng, inferSvc)
+	embedSvc := service.NewEmbeddingService(s.backend, inferSvc)
 
 	// Initialize handlers
 	chatH := handler.NewChatHandler(inferSvc)
 	genH := handler.NewGenerateHandler(inferSvc)
 	embH := handler.NewEmbedHandler(embedSvc, inferSvc)
-	modelsH := handler.NewModelsHandler(modelMgr, s.eng)
+	modelsH := handler.NewModelsHandler(modelMgr, s.backend)
 	systemH := handler.NewSystemHandler(sysInfo)
 	systemH.SetInference(inferSvc)
 
@@ -145,9 +168,14 @@ func (s *Server) buildRouter(
 }
 
 func (s *Server) Shutdown() {
-	if s.eng != nil {
-		s.eng.UnloadModel()
-		s.eng.FreeBackend()
+	if s.backend != nil {
+		s.backend.UnloadModel()
+		if s.ownsEngine {
+			s.backend.FreeBackend()
+		} else {
+			// Remote backend — this will send a graceful shutdown to the worker.
+			_ = s.backend.Close()
+		}
 	}
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)

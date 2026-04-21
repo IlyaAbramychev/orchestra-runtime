@@ -10,14 +10,17 @@ import (
 )
 
 // InferenceService handles chat completion requests with queue management.
+// Backend is either an in-process *engine.Engine or a subprocess proxy
+// (*supervisor.Remote) — chosen in server.Start based on
+// ORCHESTRA_USE_SUBPROCESS.
 type InferenceService struct {
-	engine   *engine.Engine
+	engine   engine.Backend
 	sem      chan struct{}
 	mu       sync.Mutex
 	queueLen int
 }
 
-func NewInferenceService(eng *engine.Engine, maxQueue int) *InferenceService {
+func NewInferenceService(eng engine.Backend, maxQueue int) *InferenceService {
 	if maxQueue <= 0 {
 		maxQueue = 1
 	}

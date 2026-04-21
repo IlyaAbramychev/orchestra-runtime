@@ -10,11 +10,11 @@ import (
 // EmbeddingService wraps the engine for embedding requests. Shares the same
 // semaphore as InferenceService so we don't double-book the model.
 type EmbeddingService struct {
-	engine    *engine.Engine
+	engine    engine.Backend
 	inference *InferenceService // shares the queue with chat requests
 }
 
-func NewEmbeddingService(eng *engine.Engine, inf *InferenceService) *EmbeddingService {
+func NewEmbeddingService(eng engine.Backend, inf *InferenceService) *EmbeddingService {
 	return &EmbeddingService{engine: eng, inference: inf}
 }
 

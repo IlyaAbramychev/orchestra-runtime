@@ -24,14 +24,14 @@ type hwSample struct {
 }
 
 type SystemInfo struct {
-	engine *engine.Engine
+	engine engine.Backend
 
 	hwMu     sync.Mutex
 	hwCache  hwSample
 	hwMaxAge time.Duration
 }
 
-func NewSystemInfo(eng *engine.Engine) *SystemInfo {
+func NewSystemInfo(eng engine.Backend) *SystemInfo {
 	return &SystemInfo{
 		engine:   eng,
 		hwMaxAge: 5 * time.Second,

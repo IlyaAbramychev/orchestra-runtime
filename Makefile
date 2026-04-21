@@ -1,4 +1,5 @@
 BINARY = orchestra-runtime
+WORKER_BINARY = orchestra-worker
 VERSION ?= 0.1.0
 BUILD_DIR = bin
 LLAMA_DIR = llama.cpp
@@ -68,27 +69,39 @@ BASE_CGO = CGO_ENABLED=1 CGO_CFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE)"
 BASE_LDFLAGS = -L$(LLAMA_LIB) -L$(GGML_LIB) -lllama -lggml -lstdc++ -lm
 METAL_LDFLAGS = -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 GO_BUILD = go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/server
+GO_BUILD_WORKER = go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(WORKER_BINARY) ./cmd/worker
+
+# HOST binary (./cmd/server) does NOT need CGo in subprocess mode. We still
+# link against llama.cpp for in-process mode (the default) so users keep the
+# existing single-binary workflow. Worker always needs CGo.
+#
+# On a subprocess-only future we could split: `make build-host-nocgo` that
+# compiles the server without CGo and only ships with the worker — ~10 MB
+# smaller and the host survives corrupt CGo libs.
 
 .PHONY: build-metal
 build-metal: llama-metal
-	@echo "Building $(BINARY) (Metal)..."
+	@echo "Building $(BINARY) + $(WORKER_BINARY) (Metal)..."
 	mkdir -p $(BUILD_DIR)
 	$(BASE_CGO) CGO_LDFLAGS="$(METAL_LDFLAGS)" $(GO_BUILD)
-	@echo "Built: $(BUILD_DIR)/$(BINARY)"
+	$(BASE_CGO) CGO_LDFLAGS="$(METAL_LDFLAGS)" $(GO_BUILD_WORKER)
+	@echo "Built: $(BUILD_DIR)/$(BINARY) + $(BUILD_DIR)/$(WORKER_BINARY)"
 
 .PHONY: build-cuda
 build-cuda: llama-cuda
-	@echo "Building $(BINARY) (CUDA)..."
+	@echo "Building $(BINARY) + $(WORKER_BINARY) (CUDA)..."
 	mkdir -p $(BUILD_DIR)
 	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS) -lcuda -lcudart" $(GO_BUILD)
-	@echo "Built: $(BUILD_DIR)/$(BINARY)"
+	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS) -lcuda -lcudart" $(GO_BUILD_WORKER)
+	@echo "Built: $(BUILD_DIR)/$(BINARY) + $(BUILD_DIR)/$(WORKER_BINARY)"
 
 .PHONY: build-cpu
 build-cpu: llama-cpu
-	@echo "Building $(BINARY) (CPU)..."
+	@echo "Building $(BINARY) + $(WORKER_BINARY) (CPU)..."
 	mkdir -p $(BUILD_DIR)
 	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS)" $(GO_BUILD)
-	@echo "Built: $(BUILD_DIR)/$(BINARY)"
+	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS)" $(GO_BUILD_WORKER)
+	@echo "Built: $(BUILD_DIR)/$(BINARY) + $(BUILD_DIR)/$(WORKER_BINARY)"
 
 # --- Development ---
 

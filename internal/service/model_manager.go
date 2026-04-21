@@ -35,12 +35,12 @@ type DownloadState struct {
 // ModelManager handles model CRUD and lifecycle.
 type ModelManager struct {
 	registry  *storage.ModelRegistry
-	engine    *engine.Engine
+	engine    engine.Backend
 	modelsDir string
 	downloads sync.Map // id -> *DownloadState
 }
 
-func NewModelManager(registry *storage.ModelRegistry, eng *engine.Engine, modelsDir string) *ModelManager {
+func NewModelManager(registry *storage.ModelRegistry, eng engine.Backend, modelsDir string) *ModelManager {
 	return &ModelManager{
 		registry:  registry,
 		engine:    eng,
