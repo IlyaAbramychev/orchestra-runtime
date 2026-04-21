@@ -14,6 +14,7 @@ import (
 	"github.com/operium/orchestra-runtime/internal/config"
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/handler"
+	"github.com/operium/orchestra-runtime/internal/logbuf"
 	mw "github.com/operium/orchestra-runtime/internal/middleware"
 	"github.com/operium/orchestra-runtime/internal/service"
 	"github.com/operium/orchestra-runtime/internal/storage"
@@ -27,6 +28,7 @@ type Server struct {
 	backend    engine.Backend
 	// Retained so Shutdown can call Close on the right owner.
 	ownsEngine bool
+	logs       *logbuf.Handler
 }
 
 func New(cfg *config.Config) *Server {
@@ -34,9 +36,14 @@ func New(cfg *config.Config) *Server {
 }
 
 func (s *Server) Start() error {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// Wrap our JSON handler in the ring-buffer handler so GET /api/logs can
+	// tail recent output without touching disk. The inner handler still
+	// writes to stdout, so operators / `docker logs` see the same stream.
+	baseHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: parseLogLevel(s.cfg.LogLevel),
-	})))
+	})
+	s.logs = logbuf.New(baseHandler, 500)
+	slog.SetDefault(slog.New(s.logs))
 
 	// Pick the inference backend. Subprocess mode isolates llama.cpp in a
 	// worker — a native crash no longer kills the host. In-process is the
@@ -86,9 +93,13 @@ func (s *Server) Start() error {
 	modelsH := handler.NewModelsHandler(modelMgr, s.backend)
 	systemH := handler.NewSystemHandler(sysInfo)
 	systemH.SetInference(inferSvc)
+	adminH := handler.NewAdminHandler(s.logs, func() {
+		// Graceful pre-exit hook — frees the loaded model before os.Exit.
+		s.Shutdown()
+	})
 
 	// Build router
-	s.router = s.buildRouter(chatH, genH, embH, modelsH, systemH)
+	s.router = s.buildRouter(chatH, genH, embH, modelsH, systemH, adminH)
 
 	addr := fmt.Sprintf(":%s", s.cfg.Port)
 	slog.Info("starting Orchestra Runtime", "addr", addr, "models_dir", s.cfg.ModelsDir)
@@ -110,6 +121,7 @@ func (s *Server) buildRouter(
 	embH *handler.EmbedHandler,
 	modelsH *handler.ModelsHandler,
 	systemH *handler.SystemHandler,
+	adminH *handler.AdminHandler,
 ) *chi.Mux {
 	r := chi.NewRouter()
 
@@ -162,6 +174,10 @@ func (s *Server) buildRouter(
 
 		// System info
 		r.Get("/api/system", systemH.Info)
+
+		// Admin / operational
+		r.Get("/api/logs", adminH.Logs)
+		r.Post("/api/shutdown", adminH.Shutdown)
 	})
 
 	return r
