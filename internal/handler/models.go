@@ -123,24 +123,59 @@ func (h *ModelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // Load handles POST /api/models/{id}/load.
+//
+// Body is optional — any omitted field falls back to engine.DefaultLoadOptions.
+// See model.LoadModelRequest for the full field list with semantics.
 func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req model.LoadModelRequest
 	readJSON(r, &req) // optional body
 
-	gpuLayers := -1
-	ctxSize := 4096
-	threads := 0 // 0 = auto
+	opts := engine.DefaultLoadOptions()
 
 	if req.GPULayers != nil {
-		gpuLayers = *req.GPULayers
+		opts.GPULayers = *req.GPULayers
+	}
+	if req.Threads != nil {
+		opts.Threads = *req.Threads
 	}
 	if req.ContextSize != nil {
-		ctxSize = *req.ContextSize
+		opts.CtxSize = *req.ContextSize
+	}
+	if req.BatchSize != nil {
+		opts.BatchSize = *req.BatchSize
+	}
+	if req.RopeFreqBase != nil {
+		opts.RopeFreqBase = float32(*req.RopeFreqBase)
+	}
+	if req.RopeFreqScale != nil {
+		opts.RopeFreqScale = float32(*req.RopeFreqScale)
+	}
+	if req.FlashAttention != nil {
+		if *req.FlashAttention {
+			opts.FlashAttn = 1
+		} else {
+			opts.FlashAttn = 0
+		}
+	}
+	if req.OffloadKQV != nil {
+		opts.OffloadKQV = *req.OffloadKQV
+	}
+	if req.KVCacheQuantK != nil {
+		opts.TypeK = *req.KVCacheQuantK
+	}
+	if req.KVCacheQuantV != nil {
+		opts.TypeV = *req.KVCacheQuantV
+	}
+	if req.UseMmap != nil {
+		opts.UseMmap = *req.UseMmap
+	}
+	if req.KeepModelInRAM != nil {
+		opts.UseMlock = *req.KeepModelInRAM
 	}
 
-	if err := h.manager.LoadModel(id, gpuLayers, ctxSize, threads); err != nil {
+	if err := h.manager.LoadModel(id, opts); err != nil {
 		slog.Error("load model failed", "id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -198,11 +198,20 @@ func ReadWithContext(ctx context.Context, c *Codec) (*Envelope, error) {
 // this package so both host and worker import one source of truth.
 
 type LoadParams struct {
-	ModelID   string `json:"model_id"`
-	Path      string `json:"path"`
-	GPULayers int    `json:"gpu_layers"`
-	CtxSize   int    `json:"ctx_size"`
-	Threads   int    `json:"threads"`
+	ModelID       string  `json:"model_id"`
+	Path          string  `json:"path"`
+	GPULayers     int     `json:"gpu_layers"`
+	CtxSize       int     `json:"ctx_size"`
+	Threads       int     `json:"threads"`
+	BatchSize     int     `json:"batch_size,omitempty"`
+	RopeFreqBase  float32 `json:"rope_freq_base,omitempty"`
+	RopeFreqScale float32 `json:"rope_freq_scale,omitempty"`
+	FlashAttn     int     `json:"flash_attn,omitempty"` // -1 auto, 0 off, 1 on
+	OffloadKQV    bool    `json:"offload_kqv,omitempty"`
+	UseMmap       bool    `json:"use_mmap"`
+	UseMlock      bool    `json:"use_mlock,omitempty"`
+	TypeK         string  `json:"type_k,omitempty"`
+	TypeV         string  `json:"type_v,omitempty"`
 }
 
 type StatusResult struct {

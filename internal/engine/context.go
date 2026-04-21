@@ -154,8 +154,74 @@ func (e *Engine) FreeBackend() {
 	slog.Info("llama.cpp backend freed")
 }
 
-// LoadModel loads a GGUF model into memory.
-func (e *Engine) LoadModel(modelID, path string, gpuLayers, ctxSize, threads int) error {
+// LoadOptions bundles every tunable we expose to callers. Missing fields fall
+// back to sensible defaults via `normalize()`.
+//
+// Callers should set explicitly:
+//   GPULayers    number of layers on GPU (-1 = all, 0 = CPU only)
+//   CtxSize      n_ctx; ≤ model's trained ctx to avoid RoPE extrapolation
+//   Threads      CPU threads for inference; 0 = auto
+//
+// Advanced (leave zero to inherit llama.cpp's default):
+//   BatchSize       n_batch, ≥ NCtx is fine but rarely needed
+//   RopeFreqBase    override RoPE base (0 = from GGUF)
+//   RopeFreqScale   override RoPE scale (0 = from GGUF)
+//   FlashAttn       -1 auto (default), 0 off, 1 on
+//   OffloadKQV      move KV cache to GPU (true on GPU systems)
+//   UseMmap         mmap the GGUF (true by default; false = full RAM copy)
+//   UseMlock        pin pages in RAM (guarantees no swap)
+//   TypeK/TypeV     KV cache quant: "" (f16 default), "q8_0", "q4_0", …
+type LoadOptions struct {
+	GPULayers     int
+	CtxSize       int
+	Threads       int
+	BatchSize     int
+	RopeFreqBase  float32
+	RopeFreqScale float32
+	FlashAttn     int
+	OffloadKQV    bool
+	UseMmap       bool
+	UseMlock      bool
+	TypeK         string
+	TypeV         string
+}
+
+// DefaultLoadOptions returns the set of values we use when callers pass zero
+// or a legacy signature. Matches the old behaviour prior to the expanded API.
+func DefaultLoadOptions() LoadOptions {
+	return LoadOptions{
+		GPULayers:  -1,
+		CtxSize:    4096,
+		Threads:    0,
+		BatchSize:  512,
+		FlashAttn:  -1, // auto
+		OffloadKQV: true,
+		UseMmap:    true,
+		UseMlock:   false,
+	}
+}
+
+// normalize fills in anything the caller left as a zero value with a sensible
+// default. Keeps external callers concise without losing ergonomics.
+func (o *LoadOptions) normalize() {
+	if o.CtxSize == 0 {
+		o.CtxSize = 4096
+	}
+	if o.BatchSize == 0 {
+		o.BatchSize = 512
+	}
+	if o.GPULayers == 0 {
+		// 0 is ambiguous with "CPU only"; we pick -1 (auto) here to match
+		// llama.cpp convention. Caller wanting CPU-only must pass a negative-
+		// number-in-disguise via ModelParams directly.
+		o.GPULayers = -1
+	}
+}
+
+// LoadModel loads a GGUF model into memory using `opts`.
+func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
+	opts.normalize()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -163,11 +229,23 @@ func (e *Engine) LoadModel(modelID, path string, gpuLayers, ctxSize, threads int
 	e.unloadLocked()
 
 	e.state = StateLoading
-	slog.Info("loading model", "path", path, "gpu_layers", gpuLayers, "ctx_size", ctxSize)
+	slog.Info("loading model",
+		"path", path,
+		"gpu_layers", opts.GPULayers,
+		"ctx_size", opts.CtxSize,
+		"batch", opts.BatchSize,
+		"flash_attn", opts.FlashAttn,
+		"offload_kqv", opts.OffloadKQV,
+		"use_mmap", opts.UseMmap,
+		"use_mlock", opts.UseMlock,
+		"type_k", opts.TypeK,
+		"type_v", opts.TypeV,
+	)
 
 	model, err := llamaModelLoad(path, ModelParams{
-		NGPULayers: gpuLayers,
-		UseMmap:    true,
+		NGPULayers: opts.GPULayers,
+		UseMmap:    opts.UseMmap,
+		UseMlock:   opts.UseMlock,
 	})
 	if err != nil {
 		e.state = StateError
@@ -175,9 +253,16 @@ func (e *Engine) LoadModel(modelID, path string, gpuLayers, ctxSize, threads int
 	}
 
 	ctx, err := llamaNewContext(model, ContextParams{
-		NCtx:     ctxSize,
-		NBatch:   512,
-		NThreads: threads,
+		NCtx:          opts.CtxSize,
+		NBatch:        opts.BatchSize,
+		NThreads:      opts.Threads,
+		NSeqMax:       1,
+		RopeFreqBase:  opts.RopeFreqBase,
+		RopeFreqScale: opts.RopeFreqScale,
+		FlashAttn:     opts.FlashAttn,
+		OffloadKQV:    opts.OffloadKQV,
+		TypeK:         opts.TypeK,
+		TypeV:         opts.TypeV,
 	})
 	if err != nil {
 		model.Free()

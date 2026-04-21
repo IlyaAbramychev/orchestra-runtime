@@ -1,14 +1,16 @@
 name: Release
 
-# Trigger: push a tag like `v0.2.0` → builds all platform binaries in parallel,
-# attaches them to the GitHub Release by that tag. The Operium Orchestra
-# VS Code extension polls /releases/latest and pulls assets by exact name.
+# Trigger: push a tag like `v0.2.0` → builds required-platform binaries in
+# parallel, attaches them to the GitHub Release by that tag. The Operium
+# Orchestra VS Code extension polls /releases/latest and pulls assets by
+# exact name.
 #
-# Required artifact names (must match _runtimeAssetName() in the extension):
-#   orchestra-runtime-darwin-arm64    (Apple Silicon, Metal + Accelerate)
-#   orchestra-runtime-darwin-x64      (Intel Mac, CPU + Accelerate)
-#   orchestra-runtime-linux-x64       (Linux glibc, CPU only)
-#   orchestra-runtime-win32-x64.exe   (Windows, CPU only, built with MinGW)
+# Required (this workflow, must both succeed or no release):
+#   orchestra-runtime-darwin-arm64    Apple Silicon, Metal + Accelerate
+#   orchestra-runtime-linux-x64       Linux glibc, CPU only
+#   + their orchestra-worker-* twins for subprocess mode
+#
+# Best-effort (separate workflow — see release-extras.yml): Intel Mac, Win32.
 
 on:
   push:
@@ -29,6 +31,13 @@ permissions:
   contents: write  # needed to create/update a Release and upload assets
 
 jobs:
+  # Required platforms: release WILL NOT publish unless both succeed.
+  # Why only two: Intel macOS runner availability on GitHub is terrible (runs
+  # sit queued for hours; release job can't proceed until they finish even
+  # with continue-on-error because `needs: build` waits for completion, not
+  # success). Windows+MinGW+llama.cpp is historically flaky. Both those
+  # platforms live in `release-extras.yml` and attach to the same release
+  # after it's cut — if they fail, the release still ships with core assets.
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -37,29 +46,15 @@ jobs:
       matrix:
         include:
           - name: darwin-arm64
-            runner: macos-14            # ARM64 runner
-            goos: darwin
-            goarch: arm64
+            runner: macos-14
             make_target: build-metal
             artifact: orchestra-runtime-darwin-arm64
-          - name: darwin-x64
-            runner: macos-13            # Intel runner (still available on GHA)
-            goos: darwin
-            goarch: amd64
-            make_target: build-cpu
-            artifact: orchestra-runtime-darwin-x64
+            worker_artifact: orchestra-worker-darwin-arm64
           - name: linux-x64
             runner: ubuntu-22.04
-            goos: linux
-            goarch: amd64
             make_target: build-cpu
             artifact: orchestra-runtime-linux-x64
-          - name: win32-x64
-            runner: windows-2022
-            goos: windows
-            goarch: amd64
-            make_target: build-cpu
-            artifact: orchestra-runtime-win32-x64.exe
+            worker_artifact: orchestra-worker-linux-x64
 
     steps:
       - name: Checkout (with llama.cpp submodule)
@@ -78,7 +73,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential
+          # libcurl is only strictly needed if LLAMA_CURL=ON in cmake; our
+          # Makefile sets it OFF, but install anyway so local `make` from
+          # the same VM works for contributors who flip the flag.
+          sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
 
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
@@ -86,16 +84,6 @@ jobs:
           # cmake + clang already preinstalled on GitHub runners;
           # this is a no-op guard so the step is explicit.
           cmake --version
-
-      - name: Install build deps (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # GitHub's windows-2022 ships MSYS2 + MinGW64; make sure they're on PATH.
-          # `cmake` and `mingw32-make` come with the image.
-          cmake --version
-          where.exe gcc
-          where.exe mingw32-make
 
       - name: Derive version
         id: ver
@@ -109,33 +97,24 @@ jobs:
             echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build (Unix)
-        if: runner.os != 'Windows'
+      - name: Build
         run: make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }}
 
-      - name: Build (Windows — MinGW)
-        if: runner.os == 'Windows'
-        shell: bash
-        # `make` is GNU Make provided by MSYS; works fine with our Makefile.
-        # CGo on Windows defaults to MinGW-w64 which is what llama.cpp expects
-        # for our static-linked build.
+      - name: Rename binaries for release
         run: |
-          mingw32-make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }}
+          cp bin/orchestra-runtime bin/${{ matrix.artifact }}
+          cp bin/orchestra-worker  bin/${{ matrix.worker_artifact }}
 
-      - name: Rename binary for release
-        shell: bash
-        run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp bin/orchestra-runtime.exe bin/${{ matrix.artifact }}
-          else
-            cp bin/orchestra-runtime bin/${{ matrix.artifact }}
-          fi
-
+      # We upload both binaries under a single artifact to keep the download
+      # step on the release side simple. Names still end up distinct on the
+      # GitHub Release page (orchestra-runtime-*, orchestra-worker-*).
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: bin/${{ matrix.artifact }}
+          name: ${{ matrix.name }}
+          path: |
+            bin/${{ matrix.artifact }}
+            bin/${{ matrix.worker_artifact }}
           if-no-files-found: error
           retention-days: 7
 
@@ -153,8 +132,16 @@ jobs:
       - name: Flatten paths
         run: |
           mkdir -p release-assets
+          # Each matrix entry uploads under a folder per platform; flatten
+          # so release-assets/ contains exactly the files we want as assets.
           find artifacts -type f -maxdepth 2 -exec cp {} release-assets/ \;
           ls -la release-assets/
+          # Fail explicitly if nothing made it here — otherwise softprops
+          # would publish an empty release.
+          if [ -z "$(ls -A release-assets)" ]; then
+            echo "::error::No build artifacts produced — aborting release."
+            exit 1
+          fi
 
       - name: Compute SHA256 checksums
         run: |
@@ -171,5 +158,6 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

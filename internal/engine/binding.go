@@ -36,6 +36,10 @@ type llamaModel struct {
 type ModelParams struct {
 	NGPULayers int
 	UseMmap    bool
+	// UseMlock pins the model pages in RAM so the OS can't evict them to
+	// swap. Useful when you want deterministic latency; costly because it
+	// reserves the full model size in physical memory regardless of idle.
+	UseMlock bool
 }
 
 func llamaModelLoad(path string, params ModelParams) (*llamaModel, error) {
@@ -45,6 +49,7 @@ func llamaModelLoad(path string, params ModelParams) (*llamaModel, error) {
 	mParams := C.llama_model_default_params()
 	mParams.n_gpu_layers = C.int32_t(params.NGPULayers)
 	mParams.use_mmap = C.bool(params.UseMmap)
+	mParams.use_mlock = C.bool(params.UseMlock)
 
 	ptr := C.llama_model_load_from_file(cPath, mParams)
 	if ptr == nil {
@@ -155,9 +160,49 @@ type llamaContext struct {
 }
 
 type ContextParams struct {
-	NCtx      int
-	NBatch    int
-	NThreads  int
+	NCtx     int
+	NBatch   int
+	NThreads int
+	// NSeqMax — max number of distinct sequences (parallel requests). We keep
+	// 1 for now; bumping this requires slot-aware inference which we haven't
+	// written yet.
+	NSeqMax int
+	// RopeFreqBase / RopeFreqScale — 0 = inherit from GGUF metadata. Override
+	// when you want to extrapolate context length (Together's YaRN, etc.)
+	RopeFreqBase  float32
+	RopeFreqScale float32
+	// FlashAttn: -1=auto (default), 0=disabled, 1=enabled. Big perf win on
+	// long contexts when the model supports it.
+	FlashAttn int
+	// OffloadKQV — move the KV cache itself to VRAM. On Apple Silicon unified
+	// memory there's no real separation, but on discrete GPU this matters.
+	OffloadKQV bool
+	// TypeK / TypeV — cache element type as a string. "" means inherit (f16).
+	// Supported: "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1".
+	TypeK string
+	TypeV string
+}
+
+// ggmlTypeFromString maps our string names to ggml_type enum values.
+// Matches llama.cpp's --cache-type-k / --cache-type-v CLI flag semantics.
+func ggmlTypeFromString(s string) (C.enum_ggml_type, bool) {
+	switch s {
+	case "", "f16":
+		return C.GGML_TYPE_F16, true
+	case "f32":
+		return C.GGML_TYPE_F32, true
+	case "q8_0":
+		return C.GGML_TYPE_Q8_0, true
+	case "q4_0":
+		return C.GGML_TYPE_Q4_0, true
+	case "q4_1":
+		return C.GGML_TYPE_Q4_1, true
+	case "q5_0":
+		return C.GGML_TYPE_Q5_0, true
+	case "q5_1":
+		return C.GGML_TYPE_Q5_1, true
+	}
+	return C.GGML_TYPE_F16, false
 }
 
 func llamaNewContext(model *llamaModel, params ContextParams) (*llamaContext, error) {
@@ -166,6 +211,31 @@ func llamaNewContext(model *llamaModel, params ContextParams) (*llamaContext, er
 	cParams.n_batch = C.uint32_t(params.NBatch)
 	cParams.n_threads = C.int32_t(params.NThreads)
 	cParams.n_threads_batch = C.int32_t(params.NThreads)
+
+	if params.NSeqMax > 0 {
+		cParams.n_seq_max = C.uint32_t(params.NSeqMax)
+	}
+	if params.RopeFreqBase > 0 {
+		cParams.rope_freq_base = C.float(params.RopeFreqBase)
+	}
+	if params.RopeFreqScale > 0 {
+		cParams.rope_freq_scale = C.float(params.RopeFreqScale)
+	}
+	// FlashAttn: -1 leaves default (auto); 0 or 1 explicit.
+	switch params.FlashAttn {
+	case 0:
+		cParams.flash_attn_type = C.LLAMA_FLASH_ATTN_TYPE_DISABLED
+	case 1:
+		cParams.flash_attn_type = C.LLAMA_FLASH_ATTN_TYPE_ENABLED
+	}
+	cParams.offload_kqv = C.bool(params.OffloadKQV)
+
+	if t, ok := ggmlTypeFromString(params.TypeK); ok {
+		cParams.type_k = t
+	}
+	if t, ok := ggmlTypeFromString(params.TypeV); ok {
+		cParams.type_v = t
+	}
 
 	ptr := C.llama_init_from_model(model.ptr, cParams)
 	if ptr == nil {

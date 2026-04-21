@@ -159,7 +159,21 @@ func (w *worker) dispatch(ctx context.Context, c *rpc.Codec, env *rpc.Envelope) 
 			_ = c.Write(finalErr(env.ID, rpc.ErrCodeInvalid, err.Error()))
 			return
 		}
-		if err := w.engine.LoadModel(p.ModelID, p.Path, p.GPULayers, p.CtxSize, p.Threads); err != nil {
+		opts := engine.LoadOptions{
+			GPULayers:     p.GPULayers,
+			CtxSize:       p.CtxSize,
+			Threads:       p.Threads,
+			BatchSize:     p.BatchSize,
+			RopeFreqBase:  p.RopeFreqBase,
+			RopeFreqScale: p.RopeFreqScale,
+			FlashAttn:     p.FlashAttn,
+			OffloadKQV:    p.OffloadKQV,
+			UseMmap:       p.UseMmap,
+			UseMlock:      p.UseMlock,
+			TypeK:         p.TypeK,
+			TypeV:         p.TypeV,
+		}
+		if err := w.engine.LoadModel(p.ModelID, p.Path, opts); err != nil {
 			_ = c.Write(finalErr(env.ID, rpc.ErrCodeLoadFailed, err.Error()))
 			return
 		}

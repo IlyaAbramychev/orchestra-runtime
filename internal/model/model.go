@@ -41,9 +41,32 @@ type PullModelResponse struct {
 	Status string `json:"status"`
 }
 
+// LoadModelRequest is the payload for POST /api/models/{id}/load. All fields
+// are optional — omit to inherit the runtime default. Flag names mirror
+// llama.cpp CLI where possible so users familiar with llama-server recognise
+// them.
 type LoadModelRequest struct {
-	GPULayers   *int `json:"gpu_layers,omitempty"`
-	ContextSize *int `json:"context_size,omitempty"`
+	// Hardware
+	GPULayers *int `json:"gpu_layers,omitempty"` // -1 = all available (default)
+	Threads   *int `json:"threads,omitempty"`    // 0 = auto
+
+	// Context window
+	ContextSize *int `json:"context_size,omitempty"` // n_ctx (default 4096)
+	BatchSize   *int `json:"batch_size,omitempty"`   // n_batch (default 512)
+
+	// RoPE (only override if you extrapolate context)
+	RopeFreqBase  *float64 `json:"rope_freq_base,omitempty"`
+	RopeFreqScale *float64 `json:"rope_freq_scale,omitempty"`
+
+	// KV cache placement + quantisation
+	FlashAttention *bool   `json:"flash_attention,omitempty"` // nil = auto; true/false override
+	OffloadKQV     *bool   `json:"kv_cache_gpu_offload,omitempty"`
+	KVCacheQuantK  *string `json:"kv_cache_quant_k,omitempty"` // f16|q8_0|q4_0|...
+	KVCacheQuantV  *string `json:"kv_cache_quant_v,omitempty"`
+
+	// Memory placement
+	UseMmap          *bool `json:"use_mmap,omitempty"`           // default true
+	KeepModelInRAM   *bool `json:"keep_model_in_memory,omitempty"` // use_mlock
 }
 
 type ModelStatusResponse struct {

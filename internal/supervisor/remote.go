@@ -74,7 +74,7 @@ func (r *Remote) Close() error {
 
 // ── Model management ─────────────────────────────────────────────────────────
 
-func (r *Remote) LoadModel(modelID, path string, gpuLayers, ctxSize, threads int) error {
+func (r *Remote) LoadModel(modelID, path string, opts engine.LoadOptions) error {
 	// Lazy spawn: first model load brings up the worker. Later loads reuse
 	// the same process (llama.cpp inside worker will unload the old model
 	// inside engine.LoadModel).
@@ -85,11 +85,20 @@ func (r *Remote) LoadModel(modelID, path string, gpuLayers, ctxSize, threads int
 	}
 	r.state.Store(engine.StateLoading)
 	_, err := r.worker.Call(context.Background(), rpc.MethodLoadModel, rpc.LoadParams{
-		ModelID:   modelID,
-		Path:      path,
-		GPULayers: gpuLayers,
-		CtxSize:   ctxSize,
-		Threads:   threads,
+		ModelID:       modelID,
+		Path:          path,
+		GPULayers:     opts.GPULayers,
+		CtxSize:       opts.CtxSize,
+		Threads:       opts.Threads,
+		BatchSize:     opts.BatchSize,
+		RopeFreqBase:  opts.RopeFreqBase,
+		RopeFreqScale: opts.RopeFreqScale,
+		FlashAttn:     opts.FlashAttn,
+		OffloadKQV:    opts.OffloadKQV,
+		UseMmap:       opts.UseMmap,
+		UseMlock:      opts.UseMlock,
+		TypeK:         opts.TypeK,
+		TypeV:         opts.TypeV,
 	})
 	if err != nil {
 		r.state.Store(engine.StateError)

@@ -343,14 +343,14 @@ func deriveModelName(rootDir, fullPath, filename string) string {
 	return strings.TrimSuffix(filename, ".gguf")
 }
 
-// LoadModel loads a model into the engine.
+// LoadModel loads a model into the engine with the given options.
 //
 // Safety net: on unified-memory systems (Apple Silicon, CPU-only) a load that
 // would exceed available RAM causes swap-thrash and can hang the OS requiring
 // a hard reboot. We refuse such loads unless caller explicitly bypasses via
 // ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1. This is a backstop for the UI check;
 // external HTTP clients and older extensions are also protected.
-func (m *ModelManager) LoadModel(id string, gpuLayers, ctxSize, threads int) error {
+func (m *ModelManager) LoadModel(id string, opts engine.LoadOptions) error {
 	entry := m.registry.Get(id)
 	if entry == nil {
 		return fmt.Errorf("model %s not found", id)
@@ -364,12 +364,23 @@ func (m *ModelManager) LoadModel(id string, gpuLayers, ctxSize, threads int) err
 	if os.Getenv("ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT") != "1" {
 		if st, err := os.Stat(entry.FilePath); err == nil {
 			modelBytes := st.Size()
-			// Conservative KV estimate: 0.2 MB/token (covers most 8B-32B GQA
-			// models). Smaller than UI's tiered estimate but good enough as a
-			// safety floor.
-			kvBytes := int64(ctxSize) * 200 * 1024
+			// Per-token KV estimate depends on cache quantisation:
+			//   f16 → 0.20 MB/token (covers most 8-32B GQA models)
+			//   q8_0 → half of that
+			//   q4_0 → quarter
+			kvPerTok := 200 * 1024 // f16 default
+			switch opts.TypeK {
+			case "q8_0":
+				kvPerTok = 100 * 1024
+			case "q4_0", "q4_1":
+				kvPerTok = 50 * 1024
+			}
+			ctxSize := opts.CtxSize
+			if ctxSize == 0 {
+				ctxSize = 4096
+			}
+			kvBytes := int64(ctxSize) * int64(kvPerTok)
 			avail := getAvailableRAM()
-			// Keep at least 2 GB headroom for the OS so userspace doesn't die.
 			const headroom int64 = 2 * 1024 * 1024 * 1024
 			budget := avail - headroom
 			needed := modelBytes + kvBytes
@@ -377,7 +388,8 @@ func (m *ModelManager) LoadModel(id string, gpuLayers, ctxSize, threads int) err
 				return fmt.Errorf(
 					"load would exceed available RAM: model %.1f GB + KV ~%.1f GB = %.1f GB, "+
 						"available %.1f GB (reserved 2 GB for OS). "+
-						"Close other apps, lower n_ctx, or set ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1 to bypass.",
+						"Close other apps, lower n_ctx, enable KV quantisation, "+
+						"or set ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1 to bypass.",
 					float64(modelBytes)/1024/1024/1024,
 					float64(kvBytes)/1024/1024/1024,
 					float64(needed)/1024/1024/1024,
@@ -387,7 +399,7 @@ func (m *ModelManager) LoadModel(id string, gpuLayers, ctxSize, threads int) err
 		}
 	}
 
-	return m.engine.LoadModel(id, entry.FilePath, gpuLayers, ctxSize, threads)
+	return m.engine.LoadModel(id, entry.FilePath, opts)
 }
 
 // UnloadModel unloads the current model.

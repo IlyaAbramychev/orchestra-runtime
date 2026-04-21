@@ -11,6 +11,10 @@ all: build-metal
 
 # --- llama.cpp build targets ---
 
+# -DLLAMA_CURL=OFF: recent llama.cpp requires libcurl for its own model-download
+# helpers (llama_model_load_from_url) which we don't use — we do all HTTP from
+# Go. Disabling avoids the libcurl4-openssl-dev dep on Linux.
+
 .PHONY: llama-metal
 llama-metal:
 	@echo "Building llama.cpp with Metal backend..."
@@ -21,6 +25,7 @@ llama-metal:
 		-DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF \
 		-DLLAMA_BUILD_SERVER=OFF \
+		-DLLAMA_CURL=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j$(shell sysctl -n hw.ncpu)
 	@echo "llama.cpp built successfully (Metal)"
@@ -34,6 +39,7 @@ llama-cuda:
 		-DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF \
 		-DLLAMA_BUILD_SERVER=OFF \
+		-DLLAMA_CURL=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j$$(nproc)
 	@echo "llama.cpp built successfully (CUDA)"
@@ -46,6 +52,7 @@ llama-cpu:
 		-DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF \
 		-DLLAMA_BUILD_SERVER=OFF \
+		-DLLAMA_CURL=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j4
 	@echo "llama.cpp built successfully (CPU)"

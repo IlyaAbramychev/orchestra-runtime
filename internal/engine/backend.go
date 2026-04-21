@@ -28,7 +28,7 @@ type Backend interface {
 	Close() error
 
 	// Model management
-	LoadModel(modelID, path string, gpuLayers, ctxSize, threads int) error
+	LoadModel(modelID, path string, opts LoadOptions) error
 	UnloadModel()
 	IsLoaded() bool
 	LoadedModelID() string
