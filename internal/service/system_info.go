@@ -12,7 +12,12 @@ import (
 	"github.com/operium/orchestra-runtime/internal/model"
 )
 
-const version = "0.1.0"
+// Version is the runtime's advertised build version, surfaced via /api/system.
+// It is set at process start from the `main.version` variable in cmd/server,
+// which the Makefile populates via `-ldflags="-X main.version=$(VERSION)"`.
+// Falls back to "dev" if the caller forgot to set it — makes it obvious when
+// a hand-built binary is running vs a release artefact.
+var Version = "dev"
 
 // Cached hardware sample — avoid spawning `vm_stat` / `nvidia-smi` on every
 // /api/system call (they're fork-heavy and get spammy under load).
@@ -58,7 +63,7 @@ func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 	totalRAM, availableRAM, gpu := s.hardware()
 	info := &model.SystemInfoResponse{
 		Service:            "orchestra-runtime",
-		Version:            version,
+		Version:            Version,
 		OS:                 runtime.GOOS,
 		Arch:               runtime.GOARCH,
 		CPUCount:           runtime.NumCPU(),

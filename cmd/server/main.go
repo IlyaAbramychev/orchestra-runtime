@@ -9,9 +9,19 @@ import (
 
 	"github.com/operium/orchestra-runtime/internal/config"
 	"github.com/operium/orchestra-runtime/internal/server"
+	"github.com/operium/orchestra-runtime/internal/service"
 )
 
+// version is overridden at build time by `-ldflags="-X main.version=..."`
+// (see Makefile). Defaults to "dev" so a hand-built binary is obvious.
+var version = "dev"
+
 func main() {
+	// Propagate the ldflags-injected version into /api/system so the
+	// Operium Orchestra extension can show "dev" for local builds vs the
+	// released tag for prod artefacts.
+	service.Version = version
+
 	// Promote memory faults in Go code to recoverable panics — still won't
 	// rescue C-thread SIGSEGVs from llama.cpp / Metal (those bypass Go's
 	// signal machinery entirely), but at least Go-side bugs won't take the

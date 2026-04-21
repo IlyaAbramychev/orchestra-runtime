@@ -1,6 +1,9 @@
 BINARY = orchestra-runtime
 WORKER_BINARY = orchestra-worker
-VERSION ?= 0.1.0
+# Version is injected into the binary via -ldflags (see GO_BUILD below) and
+# surfaced to clients by GET /api/system. Leave unset for dev builds — the
+# default picks a short git SHA so mismatches between builds are obvious.
+VERSION ?= dev-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DIR = bin
 LLAMA_DIR = llama.cpp
 LLAMA_BUILD_DIR = build/llama
