@@ -6,12 +6,13 @@
   "minExtensionVersion": "0.2.0",
   "maxExtensionVersion": "0.x",
   "critical": false,
-  "notes": "Бинарники: GitHub Release по тегу v0.3.1 (workflow .github/workflows/release.yml). Без релиза с assets URL ниже вернут 404.",
+  "notes": "darwin-arm64 опубликован как raw artifact в репозитории. GitHub Release assets можно подключить позже через runtime-channel-manifest workflow.",
   "artifacts": [
     {
       "platform": "darwin",
       "arch": "arm64",
-      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.1/orchestra-runtime-darwin-arm64"
+      "url": "https://raw.githubusercontent.com/IlyaAbramychev/orchestra-runtime/main/release-artifacts/v0.3.1/orchestra-runtime-darwin-arm64",
+      "sha256": "0b470169e83dd8fe8ef7ca074d044f63676afc8e973507c2e611d6f3581448ca"
     },
     {
       "platform": "linux",
