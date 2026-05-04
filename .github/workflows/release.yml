@@ -7,8 +7,7 @@ name: Release
 #
 # Required (this workflow, must both succeed or no release):
 #   orchestra-runtime-darwin-arm64    Apple Silicon, Metal + Accelerate
-#   orchestra-runtime-linux-x64       Linux glibc, CPU only
-#   + their orchestra-worker-* twins for subprocess mode
+#   + orchestra-worker-darwin-arm64 for subprocess mode
 #
 # Best-effort (separate workflow — see release-extras.yml): Intel Mac, Win32.
 
@@ -31,7 +30,7 @@ permissions:
   contents: write  # needed to create/update a Release and upload assets
 
 jobs:
-  # Required platforms: release WILL NOT publish unless both succeed.
+  # Required platform: release WILL NOT publish unless Apple Silicon succeeds.
   # Why only two: Intel macOS runner availability on GitHub is terrible (runs
   # sit queued for hours; release job can't proceed until they finish even
   # with continue-on-error because `needs: build` waits for completion, not
@@ -50,11 +49,6 @@ jobs:
             make_target: build-metal
             artifact: orchestra-runtime-darwin-arm64
             worker_artifact: orchestra-worker-darwin-arm64
-          - name: linux-x64
-            runner: ubuntu-22.04
-            make_target: build-cpu
-            artifact: orchestra-runtime-linux-x64
-            worker_artifact: orchestra-worker-linux-x64
 
     steps:
       - name: Checkout (with llama.cpp submodule)
