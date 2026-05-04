@@ -1,23 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "releasedAt": "2026-05-04T12:00:00Z",
-  "runtimeVersion": "0.3.1",
+  "releasedAt": "2026-05-04T16:33:59.642Z",
+  "runtimeVersion": "0.3.2",
   "minExtensionVersion": "0.2.0",
   "maxExtensionVersion": "0.x",
   "critical": false,
-  "notes": "darwin-arm64 опубликован как raw artifact в репозитории. GitHub Release assets можно подключить позже через runtime-channel-manifest workflow.",
+  "notes": "Test update release: darwin-arm64 GitHub Release asset v0.3.2.",
   "artifacts": [
     {
       "platform": "darwin",
       "arch": "arm64",
-      "url": "https://raw.githubusercontent.com/IlyaAbramychev/orchestra-runtime/main/release-artifacts/v0.3.1/orchestra-runtime-darwin-arm64",
-      "sha256": "0b470169e83dd8fe8ef7ca074d044f63676afc8e973507c2e611d6f3581448ca"
-    },
-    {
-      "platform": "linux",
-      "arch": "x64",
-      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.1/orchestra-runtime-linux-x64"
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.2/orchestra-runtime-darwin-arm64"
     }
   ]
 }
