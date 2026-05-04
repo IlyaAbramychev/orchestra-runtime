@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "releasedAt": "2026-05-04T12:00:00Z",
+  "runtimeVersion": "0.3.1",
+  "minExtensionVersion": "0.2.0",
+  "maxExtensionVersion": "0.x",
+  "critical": false,
+  "notes": "Бинарники: GitHub Release по тегу v0.3.1 (workflow .github/workflows/release.yml). Без релиза с assets URL ниже вернут 404.",
+  "artifacts": [
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.1/orchestra-runtime-darwin-arm64"
+    },
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.1/orchestra-runtime-linux-x64"
+    }
+  ]
+}

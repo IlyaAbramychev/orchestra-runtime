@@ -1,0 +1,90 @@
+name: Runtime Channel Manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Target channel
+        required: true
+        type: choice
+        options:
+          - canary
+          - beta
+          - stable
+      release_tag:
+        description: Existing release tag (for example v1.4.2)
+        required: true
+        type: string
+      base_url:
+        description: Public base URL for runtime artifacts
+        required: true
+        default: https://updates.operium.ru/orchestra-runtime
+        type: string
+      min_extension_version:
+        description: Minimal compatible extension version
+        required: false
+        default: 0.2.7
+        type: string
+      max_extension_version:
+        description: Max compatible extension version
+        required: false
+        default: 0.x
+        type: string
+      notes:
+        description: Release notes for this channel
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download runtime assets from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${{ inputs.release_tag }}" \
+            --pattern 'orchestra-runtime-*' \
+            --dir release-assets
+          ls -la release-assets
+
+      - name: Generate channel manifest
+        run: |
+          node scripts/generate-runtime-manifest.mjs \
+            --channel "${{ inputs.channel }}" \
+            --version "${{ inputs.release_tag }}" \
+            --artifacts-dir ./release-assets \
+            --base-url "${{ inputs.base_url }}" \
+            --min-extension-version "${{ inputs.min_extension_version }}" \
+            --max-extension-version "${{ inputs.max_extension_version }}" \
+            --notes "${{ inputs.notes }}" \
+            --output "./release-manifests/${{ inputs.channel }}.json"
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-manifest-${{ inputs.channel }}
+          path: ./release-manifests/${{ inputs.channel }}.json
+
+      - name: Commit channel manifest to repository
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "release: update ${{ inputs.channel }} manifest for ${{ inputs.release_tag }}"
+          file_pattern: "release-manifests/${{ inputs.channel }}.json"
+
+      - name: Publish hint
+        run: |
+          echo "Manifest committed to release-manifests/${{ inputs.channel }}.json"
+          echo "Point extension setting orchestra.runtimeManifestBaseUrl to raw-hosted manifest root if needed."

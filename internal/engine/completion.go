@@ -170,16 +170,23 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 
 	// Evaluate prompt (measure: prompt-eval duration)
 	promptStart := time.Now()
-	batch := llamaBatchInit(len(tokens), 1)
+	prefillBatchSize := e.promptBatchSize()
+	batch := llamaBatchInit(prefillBatchSize, 1)
 	defer batch.Free()
 
-	for i, tok := range tokens {
-		logits := i == len(tokens)-1
-		batch.Add(tok, i, 0, logits)
-	}
-
-	if err := llamaDecode(e.ctx, batch); err != nil {
-		return nil, fmt.Errorf("decode prompt: %w", err)
+	for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
+		endIdx := startIdx + prefillBatchSize
+		if endIdx > len(tokens) {
+			endIdx = len(tokens)
+		}
+		batch.Clear()
+		for i := startIdx; i < endIdx; i++ {
+			logits := i == len(tokens)-1
+			batch.Add(tokens[i], i, 0, logits)
+		}
+		if err := llamaDecode(e.ctx, batch); err != nil {
+			return nil, fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)
+		}
 	}
 	promptEvalNs := time.Since(promptStart).Nanoseconds()
 
@@ -321,17 +328,24 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 
 		// Evaluate prompt (measure: prompt-eval duration)
 		promptStart := time.Now()
-		batch := llamaBatchInit(len(tokens), 1)
+		prefillBatchSize := e.promptBatchSize()
+		batch := llamaBatchInit(prefillBatchSize, 1)
 		defer batch.Free()
 
-		for i, tok := range tokens {
-			logits := i == len(tokens)-1
-			batch.Add(tok, i, 0, logits)
-		}
-
-		if err := llamaDecode(e.ctx, batch); err != nil {
-			ch <- CompletionChunk{Err: fmt.Errorf("decode prompt: %w", err)}
-			return
+		for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
+			endIdx := startIdx + prefillBatchSize
+			if endIdx > len(tokens) {
+				endIdx = len(tokens)
+			}
+			batch.Clear()
+			for i := startIdx; i < endIdx; i++ {
+				logits := i == len(tokens)-1
+				batch.Add(tokens[i], i, 0, logits)
+			}
+			if err := llamaDecode(e.ctx, batch); err != nil {
+				ch <- CompletionChunk{Err: fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)}
+				return
+			}
 		}
 		promptEvalNs := time.Since(promptStart).Nanoseconds()
 
@@ -417,6 +431,14 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 	}()
 
 	return ch, nil
+}
+
+func (e *Engine) promptBatchSize() int {
+	// n_batch can be lower than prompt length; prefill must be chunked by this limit.
+	if e.batchSize > 0 {
+		return e.batchSize
+	}
+	return 512
 }
 
 // buildPrompt applies the chat template to convert messages into a prompt string.

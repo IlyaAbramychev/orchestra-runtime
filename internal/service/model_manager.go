@@ -364,36 +364,59 @@ func (m *ModelManager) LoadModel(id string, opts engine.LoadOptions) error {
 	if os.Getenv("ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT") != "1" {
 		if st, err := os.Stat(entry.FilePath); err == nil {
 			modelBytes := st.Size()
-			// Per-token KV estimate depends on cache quantisation:
-			//   f16 → 0.20 MB/token (covers most 8-32B GQA models)
-			//   q8_0 → half of that
-			//   q4_0 → quarter
-			kvPerTok := 200 * 1024 // f16 default
-			switch opts.TypeK {
-			case "q8_0":
-				kvPerTok = 100 * 1024
-			case "q4_0", "q4_1":
-				kvPerTok = 50 * 1024
-			}
+
+			// Per-token KV estimate (fp16). Values match the webview
+			// heuristic in ModelLoadModal.tsx — both estimate from file size.
+			// Calibrated against LM Studio: Qwen3.5 9B at 262144 tokens ≈ 16 GB,
+			// which pins the 7-9B tier at 64 KB/token.
+			//
+			//   ≤ 8 GB  → 64 KB/tok  (Qwen3 7-9B / Llama 3 8B avg)
+			//   ≤ 20 GB → 128 KB/tok (14B class)
+			//   ≤ 45 GB → 256 KB/tok (32B class)
+			//     > 45  → 384 KB/tok (70B+)
+			//
+			// Quantisation scales linearly. Base kvPerTok assumes BOTH K and V in fp16.
+			// If only one side is quantised we scale proportionally:
+			//   factor = (factor(K) + factor(V)) / 2
+			kvPerTok := kvBytesPerTokenForModel(modelBytes)
+			kFactor := kvQuantFactor(opts.TypeK)
+			vFactor := kvQuantFactor(opts.TypeV)
+			kvPerTok = int(float64(kvPerTok) * ((kFactor + vFactor) / 2.0))
+
 			ctxSize := opts.CtxSize
 			if ctxSize == 0 {
 				ctxSize = 4096
 			}
 			kvBytes := int64(ctxSize) * int64(kvPerTok)
 			avail := getAvailableRAM()
+			total := getTotalRAM()
 			const headroom int64 = 2 * 1024 * 1024 * 1024
-			budget := avail - headroom
+			availBudget := avail - headroom
+			totalBudget := total - headroom
+			if totalBudget <= 0 {
+				totalBudget = availBudget
+			}
 			needed := modelBytes + kvBytes
-			if budget > 0 && needed > budget {
+			if totalBudget > 0 && needed > totalBudget {
 				return fmt.Errorf(
-					"load would exceed available RAM: model %.1f GB + KV ~%.1f GB = %.1f GB, "+
-						"available %.1f GB (reserved 2 GB for OS). "+
+					"load would exceed RAM safety budget: model %.1f GB + KV ~%.1f GB = %.1f GB, "+
+						"available %.1f GB, total %.1f GB (reserved 2 GB for OS). "+
 						"Close other apps, lower n_ctx, enable KV quantisation, "+
 						"or set ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1 to bypass.",
 					float64(modelBytes)/1024/1024/1024,
 					float64(kvBytes)/1024/1024/1024,
 					float64(needed)/1024/1024/1024,
 					float64(avail)/1024/1024/1024,
+					float64(total)/1024/1024/1024,
+				)
+			}
+			if availBudget > 0 && needed > availBudget {
+				slog.Warn(
+					"model load exceeds current available RAM but fits total budget; allowing load",
+					"id", id,
+					"needed_gb", float64(needed)/1024/1024/1024,
+					"available_gb", float64(avail)/1024/1024/1024,
+					"total_gb", float64(total)/1024/1024/1024,
 				)
 			}
 		}
@@ -457,4 +480,34 @@ func extractFilename(url string) string {
 		name = name[:idx]
 	}
 	return name
+}
+
+// kvBytesPerTokenForModel picks a tier default for KV-cache-per-token (fp16)
+// based on model file size. See the block comment in LoadModel's guard for
+// calibration notes. Keep in sync with webview's kvBytesPerToken().
+func kvBytesPerTokenForModel(modelBytes int64) int {
+	const GB = int64(1024) * 1024 * 1024
+	switch {
+	case modelBytes < 8*GB:
+		return 64 * 1024 // 7-9B class
+	case modelBytes < 20*GB:
+		return 128 * 1024 // 14B class
+	case modelBytes < 45*GB:
+		return 256 * 1024 // 32B class
+	default:
+		return 384 * 1024 // 70B+
+	}
+}
+
+func kvQuantFactor(kind string) float64 {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "q8_0":
+		return 0.5
+	case "q5_0", "q5_1":
+		return 5.0 / 16.0
+	case "q4_0", "q4_1":
+		return 0.25
+	default:
+		return 1.0 // fp16 / unknown
+	}
 }

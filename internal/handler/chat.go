@@ -111,6 +111,15 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *
 	for chunk := range ch {
 		if chunk.Err != nil {
 			slog.Error("stream chunk error", "error", chunk.Err)
+			errPayload := map[string]any{
+				"error": map[string]any{
+					"message": chunk.Err.Error(),
+					"type":    "runtime_stream_error",
+				},
+			}
+			data, _ := json.Marshal(errPayload)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 			break
 		}
 

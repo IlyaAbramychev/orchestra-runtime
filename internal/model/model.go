@@ -52,7 +52,7 @@ type LoadModelRequest struct {
 
 	// Context window
 	ContextSize *int `json:"context_size,omitempty"` // n_ctx (default 4096)
-	BatchSize   *int `json:"batch_size,omitempty"`   // n_batch (default 512)
+	BatchSize   *int `json:"batch_size,omitempty"`   // n_batch (default 1024; auto-tuned by runtime for large n_ctx)
 
 	// RoPE (only override if you extrapolate context)
 	RopeFreqBase  *float64 `json:"rope_freq_base,omitempty"`

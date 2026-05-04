@@ -14,6 +14,8 @@ type Engine struct {
 	ctx     *llamaContext
 	vocab   *llamaVocab
 	sampler *llamaSampler
+	// batchSize mirrors llama_context n_batch for safe prompt prefill chunking.
+	batchSize int
 
 	modelID   string
 	modelPath string
@@ -193,7 +195,7 @@ func DefaultLoadOptions() LoadOptions {
 		GPULayers:  -1,
 		CtxSize:    4096,
 		Threads:    0,
-		BatchSize:  512,
+		BatchSize:  1024,
 		FlashAttn:  -1, // auto
 		OffloadKQV: true,
 		UseMmap:    true,
@@ -207,8 +209,26 @@ func (o *LoadOptions) normalize() {
 	if o.CtxSize == 0 {
 		o.CtxSize = 4096
 	}
-	if o.BatchSize == 0 {
-		o.BatchSize = 512
+	if o.BatchSize <= 0 {
+		// LM Studio-style default: use a larger prefill batch on big contexts
+		// while keeping memory bounded for smaller models/devices.
+		if o.CtxSize >= 2048 {
+			o.BatchSize = 2048
+		} else {
+			o.BatchSize = o.CtxSize
+		}
+	}
+	if o.BatchSize > o.CtxSize {
+		o.BatchSize = o.CtxSize
+	}
+	// LM Studio-like floor on large contexts: too small n_batch hurts long-prompt
+	// prefill throughput and increases edge-case instability in some model/backends.
+	if o.CtxSize >= 32768 && o.BatchSize < 1024 {
+		if o.CtxSize >= 1024 {
+			o.BatchSize = 1024
+		} else {
+			o.BatchSize = o.CtxSize
+		}
 	}
 	if o.GPULayers == 0 {
 		// 0 is ambiguous with "CPU only"; we pick -1 (auto) here to match
@@ -273,6 +293,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	e.model = model
 	e.ctx = ctx
 	e.vocab = model.Vocab()
+	e.batchSize = opts.BatchSize
 	e.modelID = modelID
 	e.modelPath = path
 	e.state = StateReady
@@ -318,6 +339,7 @@ func (e *Engine) unloadLocked() {
 		e.model = nil
 	}
 	e.vocab = nil
+	e.batchSize = 0
 	e.modelID = ""
 	e.modelPath = ""
 	e.state = StateIdle

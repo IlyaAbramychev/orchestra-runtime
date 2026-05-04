@@ -50,16 +50,24 @@ func (e *Engine) Embed(ctx context.Context, text string, normalize bool) (*Embed
 	defer e.ctx.SetEmbeddings(false)
 	e.ctx.ClearKVCache()
 
-	batch := llamaBatchInit(len(tokens), 1)
+	prefillBatchSize := e.promptBatchSize()
+	batch := llamaBatchInit(prefillBatchSize, 1)
 	defer batch.Free()
 
 	// For non-pooled models we need logits on every position so we can mean-pool.
-	for i, tok := range tokens {
-		batch.Add(tok, i, 0, true)
-	}
-
-	if err := llamaDecode(e.ctx, batch); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
+	// Prefill in chunks to respect llama.cpp n_batch on very long inputs.
+	for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
+		endIdx := startIdx + prefillBatchSize
+		if endIdx > len(tokens) {
+			endIdx = len(tokens)
+		}
+		batch.Clear()
+		for i := startIdx; i < endIdx; i++ {
+			batch.Add(tokens[i], i, 0, true)
+		}
+		if err := llamaDecode(e.ctx, batch); err != nil {
+			return nil, fmt.Errorf("decode chunk %d-%d: %w", startIdx, endIdx, err)
+		}
 	}
 
 	// Try seq-level pooled embedding first (works if ctx has pooling_type set

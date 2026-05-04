@@ -162,6 +162,20 @@ llama.cpp/                     ← git submodule (upstream)
 
 ---
 
+## Release channels
+
+Расширение **Operium Orchestra** по умолчанию тянет канал `stable` с GitHub Raw:
+
+`https://raw.githubusercontent.com/IlyaAbramychev/orchestra-runtime/main/release-manifests/stable.json`  
+(переопределяется настройкой `orchestra.runtimeManifestBaseUrl`).
+
+- В этом репозитории поддерживается [`release-manifests/stable.json`](./release-manifests/stable.json): в нём перечислены прямые URL на бинарники в **GitHub Releases** (`…/releases/download/v…/orchestra-runtime-…`).
+- Пока для указанного тега **нет опубликованного release с нужными именами файлов**, автоустановка из VS Code завершится ошибкой скачивания — сначала нужно прогнать релизный CI (`.github/workflows/release.yml` после тега `v*`) и прикрепить артефакты, либо выставить свой CDN и перегенерировать манифест (`scripts/generate-runtime-manifest.mjs`, см. workflow `runtime-channel-manifest.yml`).
+
+Дополнительно: `operium-orchestra-vscode/docs/runtime-update-manifest.md` и `docs/runtime-release-channels.md` в репозитории расширения.
+
+---
+
 ## Зависимости / Third-Party
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) (MIT) — движок инференса GGUF

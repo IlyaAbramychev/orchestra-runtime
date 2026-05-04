@@ -29,6 +29,7 @@ llama-metal:
 		-DLLAMA_BUILD_EXAMPLES=OFF \
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
+		-DLLAMA_OPENSSL=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j$(shell sysctl -n hw.ncpu)
 	@echo "llama.cpp built successfully (Metal)"
@@ -43,6 +44,7 @@ llama-cuda:
 		-DLLAMA_BUILD_EXAMPLES=OFF \
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
+		-DLLAMA_OPENSSL=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j$$(nproc)
 	@echo "llama.cpp built successfully (CUDA)"
@@ -56,6 +58,7 @@ llama-cpu:
 		-DLLAMA_BUILD_EXAMPLES=OFF \
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
+		-DLLAMA_OPENSSL=OFF \
 		-DCMAKE_BUILD_TYPE=Release
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j4
 	@echo "llama.cpp built successfully (CPU)"
