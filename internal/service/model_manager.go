@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/storage"
+)
+
+const (
+	modelDownloadMaxAttempts = 3
+	modelDownloadBaseBackoff = 500 * time.Millisecond
 )
 
 // DownloadState tracks an in-progress download.
@@ -318,6 +324,31 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	slog.Info("starting model download", "id", entry.ID, "url", entry.SourceURL, "path", entry.FilePath)
 
+	var err error
+	for attempt := 1; attempt <= modelDownloadMaxAttempts; attempt++ {
+		err = m.downloadModelAttempt(ctx, entry, ds)
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil || !isRetryableDownloadError(err) || attempt == modelDownloadMaxAttempts {
+			m.failDownload(entry, ds, err)
+			return
+		}
+
+		backoff := modelDownloadBaseBackoff * time.Duration(attempt)
+		slog.Warn("model download attempt failed; retrying", "id", entry.ID, "attempt", attempt, "backoff", backoff, "error", err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			m.failDownload(entry, ds, ctx.Err())
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (m *ModelManager) downloadModelAttempt(ctx context.Context, entry *storage.ModelEntry, ds *DownloadState) error {
 	partPath := entry.FilePath + ".part"
 	var resumeFrom int64
 	if st, err := os.Stat(partPath); err == nil && st.Size() > 0 {
@@ -326,8 +357,7 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	req, err := http.NewRequestWithContext(ctx, "GET", entry.SourceURL, nil)
 	if err != nil {
-		m.failDownload(entry, ds, fmt.Errorf("create request: %w", err))
-		return
+		return fmt.Errorf("create request: %w", err)
 	}
 	if resumeFrom > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
@@ -335,8 +365,7 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		m.failDownload(entry, ds, fmt.Errorf("download: %w", err))
-		return
+		return retryableDownloadError{err: fmt.Errorf("download: %w", err)}
 	}
 
 	if resumeFrom > 0 {
@@ -353,28 +382,23 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 			resumeFrom = 0
 			req, err = http.NewRequestWithContext(ctx, "GET", entry.SourceURL, nil)
 			if err != nil {
-				m.failDownload(entry, ds, fmt.Errorf("create request: %w", err))
-				return
+				return fmt.Errorf("create request: %w", err)
 			}
 			resp, err = http.DefaultClient.Do(req)
 			if err != nil {
-				m.failDownload(entry, ds, fmt.Errorf("download: %w", err))
-				return
+				return retryableDownloadError{err: fmt.Errorf("download: %w", err)}
 			}
 			if resp.StatusCode != http.StatusOK {
-				m.failDownload(entry, ds, fmt.Errorf("HTTP %d", resp.StatusCode))
 				resp.Body.Close()
-				return
+				return downloadHTTPError(resp.StatusCode)
 			}
 		default:
-			m.failDownload(entry, ds, fmt.Errorf("HTTP %d", resp.StatusCode))
 			resp.Body.Close()
-			return
+			return downloadHTTPError(resp.StatusCode)
 		}
 	} else if resp.StatusCode != http.StatusOK {
-		m.failDownload(entry, ds, fmt.Errorf("HTTP %d", resp.StatusCode))
 		resp.Body.Close()
-		return
+		return downloadHTTPError(resp.StatusCode)
 	}
 	defer resp.Body.Close()
 
@@ -382,27 +406,23 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 	if resumeFrom > 0 {
 		existing, err := os.Open(partPath)
 		if err != nil {
-			m.failDownload(entry, ds, fmt.Errorf("open partial file: %w", err))
-			return
+			return fmt.Errorf("open partial file: %w", err)
 		}
 		if _, err := io.Copy(hasher, existing); err != nil {
 			existing.Close()
-			m.failDownload(entry, ds, fmt.Errorf("hash partial file: %w", err))
-			return
+			return fmt.Errorf("hash partial file: %w", err)
 		}
 		existing.Close()
 	}
 
 	out, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		m.failDownload(entry, ds, fmt.Errorf("open partial file: %w", err))
-		return
+		return fmt.Errorf("open partial file: %w", err)
 	}
 	if resumeFrom == 0 {
 		if err := out.Truncate(0); err != nil {
 			out.Close()
-			m.failDownload(entry, ds, fmt.Errorf("truncate partial file: %w", err))
-			return
+			return fmt.Errorf("truncate partial file: %w", err)
 		}
 	}
 	defer out.Close()
@@ -422,8 +442,7 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 		n, readErr := reader.Read(buf)
 		if n > 0 {
 			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
-				m.failDownload(entry, ds, fmt.Errorf("write: %w", writeErr))
-				return
+				return fmt.Errorf("write: %w", writeErr)
 			}
 			downloaded += int64(n)
 			ds.DownloadedBytes.Store(downloaded)
@@ -439,8 +458,7 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 			break
 		}
 		if readErr != nil {
-			m.failDownload(entry, ds, fmt.Errorf("read: %w", readErr))
-			return
+			return retryableDownloadError{err: fmt.Errorf("read: %w", readErr)}
 		}
 	}
 
@@ -449,14 +467,12 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 	actualSHA := hex.EncodeToString(hasher.Sum(nil))
 	if entry.SHA256 != "" && !strings.EqualFold(entry.SHA256, actualSHA) {
 		os.Remove(partPath)
-		m.failDownload(entry, ds, fmt.Errorf("sha256 mismatch: expected %s, got %s", entry.SHA256, actualSHA))
-		return
+		return fmt.Errorf("sha256 mismatch: expected %s, got %s", entry.SHA256, actualSHA)
 	}
 
 	// Rename .part to final
 	if err := os.Rename(partPath, entry.FilePath); err != nil {
-		m.failDownload(entry, ds, fmt.Errorf("rename: %w", err))
-		return
+		return fmt.Errorf("rename: %w", err)
 	}
 
 	// Update registry
@@ -471,6 +487,38 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	m.downloads.Delete(entry.ID)
 	slog.Info("model downloaded", "id", entry.ID, "size", downloaded, "sha256", entry.SHA256)
+	return nil
+}
+
+type retryableDownloadError struct {
+	err error
+}
+
+func (e retryableDownloadError) Error() string {
+	return e.err.Error()
+}
+
+func (e retryableDownloadError) Unwrap() error {
+	return e.err
+}
+
+type downloadHTTPError int
+
+func (e downloadHTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d", int(e))
+}
+
+func isRetryableDownloadError(err error) bool {
+	var retryable retryableDownloadError
+	if errors.As(err, &retryable) {
+		return true
+	}
+	var httpErr downloadHTTPError
+	if errors.As(err, &httpErr) {
+		statusCode := int(httpErr)
+		return statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+	}
+	return false
 }
 
 func (m *ModelManager) failDownload(entry *storage.ModelEntry, ds *DownloadState, err error) {

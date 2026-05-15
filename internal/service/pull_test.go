@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/operium/orchestra-runtime/internal/storage"
@@ -182,5 +183,50 @@ func TestPullModelResumesPartialDownload(t *testing.T) {
 	}
 	if entry.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatalf("sha256 = %q", entry.SHA256)
+	}
+}
+
+func TestPullModelRetriesTransientHTTPError(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+	body := []byte("model")
+	sum := sha256.Sum256(body)
+	var attempts atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	id, err := manager.PullModelWithMetadata("retry", server.URL+"/model.gguf", PullModelMetadata{
+		SHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if ds := manager.GetDownloadState(id); ds != nil {
+		<-ds.Done
+		if ds.Error != nil {
+			t.Fatalf("download error: %v", ds.Error)
+		}
+	}
+
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+	entry := registry.Get(id)
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	if entry.Status != "ready" {
+		t.Fatalf("expected ready status, got %s", entry.Status)
 	}
 }
