@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +15,10 @@ import (
 )
 
 type autoLoadBackend struct {
-	loadedID string
-	loads    int
-	lastOpts engine.LoadOptions
+	loadedID   string
+	loads      int
+	lastOpts   engine.LoadOptions
+	lastParams engine.CompletionParams
 }
 
 func (b *autoLoadBackend) InitBackend()          {}
@@ -41,10 +43,11 @@ func (b *autoLoadBackend) LoadModel(id, _ string, opts engine.LoadOptions) error
 }
 
 func (b *autoLoadBackend) Complete(
-	context.Context,
-	[]engine.ChatMessage,
-	engine.CompletionParams,
+	ctx context.Context,
+	messages []engine.ChatMessage,
+	params engine.CompletionParams,
 ) (*engine.CompletionResult, error) {
+	b.lastParams = params
 	return &engine.CompletionResult{Text: "ok", FinishReason: "stop"}, nil
 }
 
@@ -239,5 +242,92 @@ func TestEmbeddingRejectsChatOnlyModel(t *testing.T) {
 	}
 	if backend.loads != 0 {
 		t.Fatalf("expected no load, got %d", backend.loads)
+	}
+}
+
+func TestInferenceAppliesModelStopTokensByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "chat.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:         "chat-1",
+		Name:       "chat-model",
+		Filename:   "chat.gguf",
+		Status:     "ready",
+		FilePath:   modelPath,
+		StopTokens: []string{"<|end|>", "<|stop|>"},
+		Capabilities: storage.ModelCapabilities{
+			Chat: true,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "chat-model",
+		Messages: []model.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	want := []string{"<|end|>", "<|stop|>"}
+	if !reflect.DeepEqual(backend.lastParams.Stop, want) {
+		t.Fatalf("expected default stop tokens %v, got %v", want, backend.lastParams.Stop)
+	}
+}
+
+func TestInferenceRequestStopOverridesModelDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "chat.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:         "chat-1",
+		Name:       "chat-model",
+		Filename:   "chat.gguf",
+		Status:     "ready",
+		FilePath:   modelPath,
+		StopTokens: []string{"<|end|>"},
+		Capabilities: storage.ModelCapabilities{
+			Chat: true,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "chat-model",
+		Messages: []model.ChatMessage{{Role: "user", Content: "hi"}},
+		Stop:     []string{"CUSTOM"},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	want := []string{"CUSTOM"}
+	if !reflect.DeepEqual(backend.lastParams.Stop, want) {
+		t.Fatalf("expected request stop tokens %v, got %v", want, backend.lastParams.Stop)
 	}
 }

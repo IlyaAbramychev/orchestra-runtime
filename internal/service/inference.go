@@ -18,10 +18,15 @@ type InferenceService struct {
 	loader    ModelLoader
 }
 
+type ModelRequestDefaults struct {
+	StopTokens []string
+}
+
 // ModelLoader resolves and loads a model for request-scoped auto-load.
 type ModelLoader interface {
 	EnsureLoaded(ctx context.Context, model string) error
 	EnsureLoadedFor(ctx context.Context, model, capability string) error
+	DefaultsForModel(model string) (ModelRequestDefaults, error)
 }
 
 func NewInferenceService(eng engine.Backend, maxQueue int) *InferenceService {
@@ -47,6 +52,19 @@ func (s *InferenceService) ensureLoaded(ctx context.Context, model string) error
 		return fmt.Errorf("no model loaded")
 	}
 	return nil
+}
+
+func (s *InferenceService) applyModelDefaults(model string, params *engine.CompletionParams) {
+	if s.loader == nil || model == "" || len(params.Stop) > 0 {
+		return
+	}
+	defaults, err := s.loader.DefaultsForModel(model)
+	if err != nil {
+		return
+	}
+	if len(defaults.StopTokens) > 0 {
+		params.Stop = append([]string(nil), defaults.StopTokens...)
+	}
 }
 
 // QueueDepth returns the number of waiting requests.
@@ -100,6 +118,7 @@ func (s *InferenceService) Generate(
 	if err := s.ensureLoaded(ctx, model); err != nil {
 		return nil, err
 	}
+	s.applyModelDefaults(model, &params)
 	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
 	if err != nil {
 		return nil, err
@@ -120,6 +139,7 @@ func (s *InferenceService) GenerateStream(
 	if err := s.ensureLoaded(ctx, model); err != nil {
 		return nil, err
 	}
+	s.applyModelDefaults(model, &params)
 	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
 	if err != nil {
 		return nil, err
@@ -164,6 +184,7 @@ func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompleti
 
 	msgs := toEngineMessages(req.Messages)
 	params := toEngineParams(req)
+	s.applyModelDefaults(req.Model, &params)
 
 	return s.engine.Complete(ctx, msgs, params)
 }
@@ -181,6 +202,7 @@ func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCo
 
 	msgs := toEngineMessages(req.Messages)
 	params := toEngineParams(req)
+	s.applyModelDefaults(req.Model, &params)
 
 	ch, err := s.engine.CompleteStream(ctx, msgs, params)
 	if err != nil {

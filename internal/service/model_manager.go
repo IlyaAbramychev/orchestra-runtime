@@ -198,6 +198,17 @@ func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability stri
 	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptions())
 }
 
+func (m *ModelManager) DefaultsForModel(ref string) (ModelRequestDefaults, error) {
+	entry, err := m.ResolveModel(ref)
+	if err != nil {
+		return ModelRequestDefaults{}, err
+	}
+	normalized := cloneModelEntry(entry)
+	return ModelRequestDefaults{
+		StopTokens: append([]string(nil), normalized.StopTokens...),
+	}, nil
+}
+
 func requireModelCapability(entry *storage.ModelEntry, capability string) error {
 	if capability == "" {
 		return nil
