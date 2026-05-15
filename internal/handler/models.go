@@ -103,6 +103,7 @@ func (h *ModelsHandler) Pull(w http.ResponseWriter, r *http.Request) {
 		Quantization:        req.Quantization,
 		Family:              req.Family,
 		Parameters:          req.Parameters,
+		SHA256:              req.SHA256,
 		Template:            req.Template,
 		StopTokens:          append([]string(nil), req.StopTokens...),
 		Capabilities:        toStorageCapabilitiesPtr(req.Capabilities),

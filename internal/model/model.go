@@ -53,6 +53,7 @@ type PullModelRequest struct {
 	Quantization        string                    `json:"quantization,omitempty"`
 	Family              string                    `json:"family,omitempty"`
 	Parameters          string                    `json:"parameters,omitempty"`
+	SHA256              string                    `json:"sha256,omitempty"`
 	Template            string                    `json:"template,omitempty"`
 	StopTokens          []string                  `json:"stop_tokens,omitempty"`
 	Capabilities        *ModelCapabilities        `json:"capabilities,omitempty"`

@@ -36,6 +36,7 @@ type PullModelMetadata struct {
 	Quantization        string
 	Family              string
 	Parameters          string
+	SHA256              string
 	Template            string
 	StopTokens          []string
 	Capabilities        *storage.ModelCapabilities
@@ -285,6 +286,7 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 		Quantization:        quantization,
 		Family:              family,
 		Parameters:          parameters,
+		SHA256:              strings.ToLower(strings.TrimSpace(metadata.SHA256)),
 		Template:            metadata.Template,
 		StopTokens:          append([]string(nil), metadata.StopTokens...),
 		Capabilities:        capabilities,
@@ -379,6 +381,13 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	out.Close()
 
+	actualSHA := hex.EncodeToString(hasher.Sum(nil))
+	if entry.SHA256 != "" && !strings.EqualFold(entry.SHA256, actualSHA) {
+		os.Remove(partPath)
+		m.failDownload(entry, ds, fmt.Errorf("sha256 mismatch: expected %s, got %s", entry.SHA256, actualSHA))
+		return
+	}
+
 	// Rename .part to final
 	if err := os.Rename(partPath, entry.FilePath); err != nil {
 		m.failDownload(entry, ds, fmt.Errorf("rename: %w", err))
@@ -387,7 +396,7 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	// Update registry
 	entry.Size = downloaded
-	entry.SHA256 = hex.EncodeToString(hasher.Sum(nil))
+	entry.SHA256 = actualSHA
 	entry.Status = "ready"
 	entry.DownloadedAt = time.Now().UTC()
 
