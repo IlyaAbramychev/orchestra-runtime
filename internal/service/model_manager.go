@@ -128,7 +128,17 @@ func cloneModelEntry(entry *storage.ModelEntry) *storage.ModelEntry {
 		return nil
 	}
 	copy := *entry
+	normalizeModelMetadata(&copy)
 	return &copy
+}
+
+func normalizeModelMetadata(entry *storage.ModelEntry) {
+	if entry.Capabilities == (storage.ModelCapabilities{}) {
+		entry.Capabilities = inferModelCapabilities(entry.Name, entry.Filename)
+	}
+	if entry.RecommendedSettings == (storage.RecommendedModelSettings{}) {
+		entry.RecommendedSettings = inferRecommendedSettings(modelMeta{parameters: entry.Parameters})
+	}
 }
 
 // ResolveModel finds a model by registry id, display name, filename, or
@@ -193,16 +203,18 @@ func (m *ModelManager) PullModel(name, sourceURL string) (string, error) {
 	meta := parseModelMetadata(filename)
 
 	entry := &storage.ModelEntry{
-		ID:           id,
-		Name:         name,
-		Filename:     filename,
-		SourceURL:    sourceURL,
-		Quantization: meta.quantization,
-		Family:       meta.family,
-		Parameters:   meta.parameters,
-		Status:       "downloading",
-		FilePath:     filepath.Join(m.modelsDir, filename),
-		DownloadedAt: time.Now().UTC(),
+		ID:                  id,
+		Name:                name,
+		Filename:            filename,
+		SourceURL:           sourceURL,
+		Quantization:        meta.quantization,
+		Family:              meta.family,
+		Parameters:          meta.parameters,
+		Capabilities:        inferModelCapabilities(name, filename),
+		RecommendedSettings: inferRecommendedSettings(meta),
+		Status:              "downloading",
+		FilePath:            filepath.Join(m.modelsDir, filename),
+		DownloadedAt:        time.Now().UTC(),
 	}
 
 	if err := m.registry.Add(entry); err != nil {
@@ -404,18 +416,20 @@ func (m *ModelManager) ImportFromDirectory(dir string) ([]*storage.ModelEntry, e
 		name := deriveModelName(absDir, path, filename)
 
 		entry := &storage.ModelEntry{
-			ID:           uuid.New().String(),
-			Name:         name,
-			Filename:     filename,
-			Size:         info.Size(),
-			Quantization: meta.quantization,
-			Family:       meta.family,
-			Parameters:   meta.parameters,
-			SourceURL:    "file://" + path,
-			Status:       "ready",
-			FilePath:     path,
-			DownloadedAt: info.ModTime().UTC(),
-			External:     true,
+			ID:                  uuid.New().String(),
+			Name:                name,
+			Filename:            filename,
+			Size:                info.Size(),
+			Quantization:        meta.quantization,
+			Family:              meta.family,
+			Parameters:          meta.parameters,
+			Capabilities:        inferModelCapabilities(name, filename),
+			RecommendedSettings: inferRecommendedSettings(meta),
+			SourceURL:           "file://" + path,
+			Status:              "ready",
+			FilePath:            path,
+			DownloadedAt:        info.ModTime().UTC(),
+			External:            true,
 		}
 
 		if err := m.registry.Add(entry); err != nil {
@@ -596,6 +610,34 @@ func parseModelMetadata(filename string) modelMeta {
 	}
 
 	return meta
+}
+
+func inferModelCapabilities(name, filename string) storage.ModelCapabilities {
+	combined := strings.ToLower(name + " " + filename)
+	isEmbedding := strings.Contains(combined, "embed") ||
+		strings.Contains(combined, "bge-") ||
+		strings.Contains(combined, "e5-") ||
+		strings.Contains(combined, "gte-")
+	return storage.ModelCapabilities{
+		Chat:       !isEmbedding,
+		Embeddings: isEmbedding,
+		Rerank:     strings.Contains(combined, "rerank"),
+		Tools:      false,
+		Thinking:   strings.Contains(combined, "qwen3") || strings.Contains(combined, "deepseek-r1"),
+	}
+}
+
+func inferRecommendedSettings(meta modelMeta) storage.RecommendedModelSettings {
+	settings := storage.RecommendedModelSettings{ContextSize: 4096}
+	switch strings.ToUpper(meta.parameters) {
+	case "1B", "1.5B", "2B", "3B", "4B":
+		settings.ContextSize = 8192
+	case "7B", "8B", "9B":
+		settings.ContextSize = 8192
+	case "14B", "27B", "32B":
+		settings.ContextSize = 4096
+	}
+	return settings
 }
 
 func extractFilename(url string) string {

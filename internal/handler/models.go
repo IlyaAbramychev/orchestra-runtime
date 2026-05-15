@@ -245,12 +245,13 @@ func (h *ModelsHandler) ListOllamaTags(w http.ResponseWriter, r *http.Request) {
 		QuantizationLevel string   `json:"quantization_level,omitempty"`
 	}
 	type ollamaTag struct {
-		Name       string        `json:"name"`
-		Model      string        `json:"model"`
-		ModifiedAt string        `json:"modified_at"`
-		Size       int64         `json:"size"`
-		Digest     string        `json:"digest,omitempty"`
-		Details    ollamaDetails `json:"details"`
+		Name         string                  `json:"name"`
+		Model        string                  `json:"model"`
+		ModifiedAt   string                  `json:"modified_at"`
+		Size         int64                   `json:"size"`
+		Digest       string                  `json:"digest,omitempty"`
+		Details      ollamaDetails           `json:"details"`
+		Capabilities model.ModelCapabilities `json:"capabilities"`
 	}
 	tags := make([]ollamaTag, 0, len(entries))
 	for _, e := range entries {
@@ -269,6 +270,7 @@ func (h *ModelsHandler) ListOllamaTags(w http.ResponseWriter, r *http.Request) {
 				ParameterSize:     e.Parameters,
 				QuantizationLevel: e.Quantization,
 			},
+			Capabilities: toModelCapabilities(e.Capabilities),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": tags})
@@ -339,13 +341,16 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"modelfile":  "", // placeholder — we don't support Modelfile yet
 		"parameters": "", // future: surface load-time params
-		"template":   "", // future: surface chat template
+		"template":   entry.Template,
 		"details": map[string]any{
 			"format":             "gguf",
 			"family":             entry.Family,
 			"parameter_size":     entry.Parameters,
 			"quantization_level": entry.Quantization,
 		},
+		"capabilities":         toModelCapabilities(entry.Capabilities),
+		"stop_tokens":          entry.StopTokens,
+		"recommended_settings": toRecommendedSettings(entry.RecommendedSettings),
 		"model_info": map[string]any{
 			"general.name":       entry.Name,
 			"general.size_bytes": entry.Size,
@@ -357,20 +362,40 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 
 func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
 	return model.ModelInfo{
-		ID:           e.ID,
-		Name:         e.Name,
-		Filename:     e.Filename,
-		Size:         e.Size,
-		SizeHuman:    model.HumanSize(e.Size),
-		Quantization: e.Quantization,
-		Family:       e.Family,
-		Parameters:   e.Parameters,
-		SourceURL:    e.SourceURL,
-		SHA256:       e.SHA256,
-		Status:       e.Status,
-		ErrorMessage: e.ErrorMessage,
-		FilePath:     e.FilePath,
-		DownloadedAt: e.DownloadedAt,
+		ID:                  e.ID,
+		Name:                e.Name,
+		Filename:            e.Filename,
+		Size:                e.Size,
+		SizeHuman:           model.HumanSize(e.Size),
+		Quantization:        e.Quantization,
+		Family:              e.Family,
+		Parameters:          e.Parameters,
+		Template:            e.Template,
+		StopTokens:          e.StopTokens,
+		Capabilities:        toModelCapabilities(e.Capabilities),
+		RecommendedSettings: toRecommendedSettings(e.RecommendedSettings),
+		SourceURL:           e.SourceURL,
+		SHA256:              e.SHA256,
+		Status:              e.Status,
+		ErrorMessage:        e.ErrorMessage,
+		FilePath:            e.FilePath,
+		DownloadedAt:        e.DownloadedAt,
+	}
+}
+
+func toModelCapabilities(c storage.ModelCapabilities) model.ModelCapabilities {
+	return model.ModelCapabilities{
+		Chat:       c.Chat,
+		Embeddings: c.Embeddings,
+		Rerank:     c.Rerank,
+		Tools:      c.Tools,
+		Thinking:   c.Thinking,
+	}
+}
+
+func toRecommendedSettings(s storage.RecommendedModelSettings) model.RecommendedModelSettings {
+	return model.RecommendedModelSettings{
+		ContextSize: s.ContextSize,
 	}
 }
 

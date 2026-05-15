@@ -11,20 +11,36 @@ import (
 
 // ModelEntry represents a downloaded model on disk.
 type ModelEntry struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Filename     string    `json:"filename"`
-	Size         int64     `json:"size"`
-	Quantization string    `json:"quantization,omitempty"`
-	Family       string    `json:"family,omitempty"`
-	Parameters   string    `json:"parameters,omitempty"`
-	SourceURL    string    `json:"source_url"`
-	SHA256       string    `json:"sha256,omitempty"`
-	Status       string    `json:"status"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	FilePath     string    `json:"file_path"`
-	DownloadedAt time.Time `json:"downloaded_at"`
-	External     bool      `json:"external,omitempty"` // true for imported models (e.g. from LM Studio)
+	ID                  string                   `json:"id"`
+	Name                string                   `json:"name"`
+	Filename            string                   `json:"filename"`
+	Size                int64                    `json:"size"`
+	Quantization        string                   `json:"quantization,omitempty"`
+	Family              string                   `json:"family,omitempty"`
+	Parameters          string                   `json:"parameters,omitempty"`
+	Template            string                   `json:"template,omitempty"`
+	StopTokens          []string                 `json:"stop_tokens,omitempty"`
+	Capabilities        ModelCapabilities        `json:"capabilities"`
+	RecommendedSettings RecommendedModelSettings `json:"recommended_settings"`
+	SourceURL           string                   `json:"source_url"`
+	SHA256              string                   `json:"sha256,omitempty"`
+	Status              string                   `json:"status"`
+	ErrorMessage        string                   `json:"error_message,omitempty"`
+	FilePath            string                   `json:"file_path"`
+	DownloadedAt        time.Time                `json:"downloaded_at"`
+	External            bool                     `json:"external,omitempty"` // true for imported models (e.g. from LM Studio)
+}
+
+type ModelCapabilities struct {
+	Chat       bool `json:"chat"`
+	Embeddings bool `json:"embeddings"`
+	Rerank     bool `json:"rerank"`
+	Tools      bool `json:"tools"`
+	Thinking   bool `json:"thinking"`
+}
+
+type RecommendedModelSettings struct {
+	ContextSize int `json:"context_size,omitempty"`
 }
 
 type registryData struct {
@@ -33,9 +49,9 @@ type registryData struct {
 
 // ModelRegistry manages model metadata persisted as JSON.
 type ModelRegistry struct {
-	mu       sync.RWMutex
-	path     string
-	models   map[string]*ModelEntry
+	mu     sync.RWMutex
+	path   string
+	models map[string]*ModelEntry
 }
 
 func NewModelRegistry(modelsDir string) (*ModelRegistry, error) {

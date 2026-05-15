@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,6 +203,52 @@ func TestListRunningUsesRuntimeSnapshot(t *testing.T) {
 	}
 	if resp.Models[0].State != engine.StateGenerating {
 		t.Fatalf("expected generating state, got %q", resp.Models[0].State)
+	}
+}
+
+func TestShowIncludesModelMetadata(t *testing.T) {
+	registry, err := storage.NewModelRegistry(t.TempDir())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:         "embed",
+		Name:       "bge-embed",
+		Filename:   "bge-small-embed-q4.gguf",
+		Status:     "ready",
+		Family:     "bge",
+		Parameters: "1B",
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &fakeChatBackend{}
+	scheduler := service.NewRuntimeScheduler(backend, 1)
+	manager := service.NewModelManagerWithScheduler(registry, scheduler, t.TempDir())
+	handler := NewModelsHandler(manager, backend)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/show", strings.NewReader(`{"model":"bge-embed"}`))
+	rec := httptest.NewRecorder()
+	handler.Show(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Capabilities        model.ModelCapabilities        `json:"capabilities"`
+		RecommendedSettings model.RecommendedModelSettings `json:"recommended_settings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Capabilities.Chat {
+		t.Fatal("embedding model should not default to chat capability")
+	}
+	if !resp.Capabilities.Embeddings {
+		t.Fatal("expected embedding capability")
+	}
+	if resp.RecommendedSettings.ContextSize == 0 {
+		t.Fatal("expected recommended context size")
 	}
 }
 

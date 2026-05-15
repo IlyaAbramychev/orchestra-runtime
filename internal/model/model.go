@@ -7,20 +7,36 @@ import (
 
 // ModelInfo represents a downloaded model in the registry.
 type ModelInfo struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Filename     string    `json:"filename"`
-	Size         int64     `json:"size"`
-	SizeHuman    string    `json:"size_human"`
-	Quantization string    `json:"quantization,omitempty"`
-	Family       string    `json:"family,omitempty"`
-	Parameters   string    `json:"parameters,omitempty"`
-	SourceURL    string    `json:"source_url"`
-	SHA256       string    `json:"sha256,omitempty"`
-	Status       string    `json:"status"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	FilePath     string    `json:"file_path"`
-	DownloadedAt time.Time `json:"downloaded_at"`
+	ID                  string                   `json:"id"`
+	Name                string                   `json:"name"`
+	Filename            string                   `json:"filename"`
+	Size                int64                    `json:"size"`
+	SizeHuman           string                   `json:"size_human"`
+	Quantization        string                   `json:"quantization,omitempty"`
+	Family              string                   `json:"family,omitempty"`
+	Parameters          string                   `json:"parameters,omitempty"`
+	Template            string                   `json:"template,omitempty"`
+	StopTokens          []string                 `json:"stop_tokens,omitempty"`
+	Capabilities        ModelCapabilities        `json:"capabilities"`
+	RecommendedSettings RecommendedModelSettings `json:"recommended_settings"`
+	SourceURL           string                   `json:"source_url"`
+	SHA256              string                   `json:"sha256,omitempty"`
+	Status              string                   `json:"status"`
+	ErrorMessage        string                   `json:"error_message,omitempty"`
+	FilePath            string                   `json:"file_path"`
+	DownloadedAt        time.Time                `json:"downloaded_at"`
+}
+
+type ModelCapabilities struct {
+	Chat       bool `json:"chat"`
+	Embeddings bool `json:"embeddings"`
+	Rerank     bool `json:"rerank"`
+	Tools      bool `json:"tools"`
+	Thinking   bool `json:"thinking"`
+}
+
+type RecommendedModelSettings struct {
+	ContextSize int `json:"context_size,omitempty"`
 }
 
 // Model statuses
