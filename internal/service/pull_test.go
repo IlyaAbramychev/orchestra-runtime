@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/operium/orchestra-runtime/internal/storage"
 )
@@ -228,5 +229,64 @@ func TestPullModelRetriesTransientHTTPError(t *testing.T) {
 	}
 	if entry.Status != "ready" {
 		t.Fatalf("expected ready status, got %s", entry.Status)
+	}
+}
+
+func TestPullModelDeduplicatesActiveDownload(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+	body := []byte("model")
+	sum := sha256.Sum256(body)
+	var requests atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	id, err := manager.PullModelWithMetadata("dedupe", server.URL+"/model.gguf", PullModelMetadata{
+		SHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("first pull: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for download")
+	}
+
+	duplicateID, err := manager.PullModelWithMetadata("dedupe", server.URL+"/model.gguf", PullModelMetadata{
+		SHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("duplicate pull: %v", err)
+	}
+	if duplicateID != id {
+		t.Fatalf("duplicate id = %s, want %s", duplicateID, id)
+	}
+	if got := len(registry.List()); got != 1 {
+		t.Fatalf("registry entries = %d", got)
+	}
+
+	close(release)
+	if ds := manager.GetDownloadState(id); ds != nil {
+		<-ds.Done
+		if ds.Error != nil {
+			t.Fatalf("download error: %v", ds.Error)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d", requests.Load())
 	}
 }

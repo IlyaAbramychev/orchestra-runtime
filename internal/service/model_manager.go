@@ -61,6 +61,7 @@ type ModelManager struct {
 	modelsDir          string
 	defaultLoadOptions engine.LoadOptions
 	loadMu             sync.Mutex
+	pullMu             sync.Mutex
 	downloads          sync.Map // id -> *DownloadState
 }
 
@@ -265,15 +266,25 @@ func (m *ModelManager) PullModel(name, sourceURL string) (string, error) {
 }
 
 func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata PullModelMetadata) (string, error) {
+	sourceURL = strings.TrimSpace(sourceURL)
 	if sourceURL == "" {
 		return "", fmt.Errorf("source_url is required")
 	}
 
-	id := uuid.New().String()
 	filename := extractFilename(sourceURL)
 	if filename == "" {
 		filename = name + ".gguf"
 	}
+	filePath := filepath.Join(m.modelsDir, filename)
+
+	m.pullMu.Lock()
+	defer m.pullMu.Unlock()
+
+	if existing := m.findExistingPull(sourceURL, filePath); existing != nil {
+		return existing.ID, nil
+	}
+
+	id := uuid.New().String()
 
 	meta := parseModelMetadata(filename)
 	quantization := firstNonEmpty(metadata.Quantization, meta.quantization)
@@ -302,7 +313,7 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 		Capabilities:        capabilities,
 		RecommendedSettings: settings,
 		Status:              "downloading",
-		FilePath:            filepath.Join(m.modelsDir, filename),
+		FilePath:            filePath,
 		DownloadedAt:        time.Now().UTC(),
 	}
 
@@ -322,6 +333,18 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 	go m.downloadModel(ctx, entry, ds)
 
 	return id, nil
+}
+
+func (m *ModelManager) findExistingPull(sourceURL, filePath string) *storage.ModelEntry {
+	for _, entry := range m.registry.List() {
+		if entry.Status == "error" {
+			continue
+		}
+		if entry.SourceURL == sourceURL || entry.FilePath == filePath {
+			return entry
+		}
+	}
+	return nil
 }
 
 func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEntry, ds *DownloadState) {
