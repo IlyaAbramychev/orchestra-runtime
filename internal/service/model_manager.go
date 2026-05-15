@@ -33,6 +33,10 @@ type DownloadState struct {
 	TotalBytes      int64
 	DownloadedBytes atomic.Int64
 	SpeedBPS        atomic.Int64
+	Attempt         atomic.Int32
+	MaxAttempts     int
+	ResumeFrom      atomic.Int64
+	LastError       atomic.Value
 	Error           error
 	Cancel          context.CancelFunc
 	Done            chan struct{}
@@ -308,9 +312,10 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ds := &DownloadState{
-		ModelID: id,
-		Cancel:  cancel,
-		Done:    make(chan struct{}),
+		ModelID:     id,
+		MaxAttempts: modelDownloadMaxAttempts,
+		Cancel:      cancel,
+		Done:        make(chan struct{}),
 	}
 	m.downloads.Store(id, ds)
 
@@ -326,10 +331,12 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 
 	var err error
 	for attempt := 1; attempt <= modelDownloadMaxAttempts; attempt++ {
+		ds.Attempt.Store(int32(attempt))
 		err = m.downloadModelAttempt(ctx, entry, ds)
 		if err == nil {
 			return
 		}
+		ds.setLastError(err)
 		if ctx.Err() != nil || !isRetryableDownloadError(err) || attempt == modelDownloadMaxAttempts {
 			m.failDownload(entry, ds, err)
 			return
@@ -354,6 +361,7 @@ func (m *ModelManager) downloadModelAttempt(ctx context.Context, entry *storage.
 	if st, err := os.Stat(partPath); err == nil && st.Size() > 0 {
 		resumeFrom = st.Size()
 	}
+	ds.ResumeFrom.Store(resumeFrom)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", entry.SourceURL, nil)
 	if err != nil {
@@ -521,8 +529,24 @@ func isRetryableDownloadError(err error) bool {
 	return false
 }
 
+func (ds *DownloadState) setLastError(err error) {
+	if err != nil {
+		ds.LastError.Store(err.Error())
+	}
+}
+
+func (ds *DownloadState) LastErrorMessage() string {
+	if value := ds.LastError.Load(); value != nil {
+		if msg, ok := value.(string); ok {
+			return msg
+		}
+	}
+	return ""
+}
+
 func (m *ModelManager) failDownload(entry *storage.ModelEntry, ds *DownloadState, err error) {
 	slog.Error("model download failed", "id", entry.ID, "error", err)
+	ds.setLastError(err)
 	ds.Error = err
 	entry.Status = "error"
 	entry.ErrorMessage = err.Error()

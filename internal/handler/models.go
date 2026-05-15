@@ -229,6 +229,10 @@ func (h *ModelsHandler) Status(w http.ResponseWriter, r *http.Request) {
 			resp.DownloadedBytes = ds.DownloadedBytes.Load()
 			resp.TotalBytes = ds.TotalBytes
 			resp.SpeedBPS = ds.SpeedBPS.Load()
+			resp.DownloadAttempt = int(ds.Attempt.Load())
+			resp.MaxAttempts = ds.MaxAttempts
+			resp.ResumeFrom = ds.ResumeFrom.Load()
+			resp.LastDownloadError = ds.LastErrorMessage()
 			if ds.TotalBytes > 0 {
 				resp.DownloadProgress = float64(resp.DownloadedBytes) / float64(ds.TotalBytes) * 100
 			}

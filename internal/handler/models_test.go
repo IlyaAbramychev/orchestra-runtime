@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +75,74 @@ func TestModelStatusIncludesRuntimeSnapshot(t *testing.T) {
 	}
 	if !resp.Active {
 		t.Fatal("expected active model")
+	}
+}
+
+func TestModelStatusIncludesDownloadTelemetry(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, tmp)
+	handler := NewModelsHandler(manager, backend)
+
+	var attempts atomic.Int32
+	secondStarted := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		if attempt == 1 {
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+			return
+		}
+		if attempt == 2 {
+			close(secondStarted)
+			<-release
+		}
+		_, _ = w.Write([]byte("model"))
+	}))
+	defer server.Close()
+
+	id, err := manager.PullModel("telemetry", server.URL+"/model.gguf")
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for retry")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/models/"+id+"/status", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("id", id)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	rec := httptest.NewRecorder()
+
+	handler.Status(rec, req)
+
+	close(release)
+	if ds := manager.GetDownloadState(id); ds != nil {
+		<-ds.Done
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.ModelStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.DownloadAttempt != 2 {
+		t.Fatalf("download_attempt = %d", resp.DownloadAttempt)
+	}
+	if resp.MaxAttempts != 3 {
+		t.Fatalf("download_max_attempts = %d", resp.MaxAttempts)
+	}
+	if resp.LastDownloadError != "HTTP 502" {
+		t.Fatalf("last_download_error = %q", resp.LastDownloadError)
 	}
 }
 

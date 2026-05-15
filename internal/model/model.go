@@ -94,17 +94,21 @@ type LoadModelRequest struct {
 }
 
 type ModelStatusResponse struct {
-	ID               string  `json:"id"`
-	Name             string  `json:"name"`
-	Status           string  `json:"status"`
-	RuntimeState     string  `json:"runtime_state"`
-	Active           bool    `json:"active"`
-	QueueDepth       int     `json:"queue_depth"`
-	DownloadProgress float64 `json:"download_progress,omitempty"`
-	DownloadedBytes  int64   `json:"downloaded_bytes,omitempty"`
-	TotalBytes       int64   `json:"total_bytes,omitempty"`
-	SpeedBPS         int64   `json:"speed_bytes_per_sec,omitempty"`
-	ErrorMessage     string  `json:"error_message,omitempty"`
+	ID                string  `json:"id"`
+	Name              string  `json:"name"`
+	Status            string  `json:"status"`
+	RuntimeState      string  `json:"runtime_state"`
+	Active            bool    `json:"active"`
+	QueueDepth        int     `json:"queue_depth"`
+	DownloadProgress  float64 `json:"download_progress,omitempty"`
+	DownloadedBytes   int64   `json:"downloaded_bytes,omitempty"`
+	TotalBytes        int64   `json:"total_bytes,omitempty"`
+	SpeedBPS          int64   `json:"speed_bytes_per_sec,omitempty"`
+	DownloadAttempt   int     `json:"download_attempt,omitempty"`
+	MaxAttempts       int     `json:"download_max_attempts,omitempty"`
+	ResumeFrom        int64   `json:"resume_from,omitempty"`
+	LastDownloadError string  `json:"last_download_error,omitempty"`
+	ErrorMessage      string  `json:"error_message,omitempty"`
 }
 
 // OpenAIModel is the OpenAI-compatible model list entry.
