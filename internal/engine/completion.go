@@ -485,6 +485,9 @@ func (e *Engine) buildPrompt(messages []ChatMessage, template string) (string, e
 	// Empty template tells llama.cpp to use the model's embedded template.
 	result, err := ApplyChatTemplate(template, messages, true)
 	if err != nil {
+		if template != "" {
+			return "", fmt.Errorf("custom chat template failed: %w", err)
+		}
 		slog.Warn("chat template failed, falling back to ChatML", "error", err)
 		return buildChatMLPrompt(messages), nil
 	}

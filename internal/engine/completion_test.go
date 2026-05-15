@@ -39,3 +39,11 @@ func TestStopStreamFilterFlushesWhenNoStop(t *testing.T) {
 		t.Fatalf("expected flush to release held text, got %q", out)
 	}
 }
+
+func TestBuildPromptReturnsErrorForInvalidCustomTemplate(t *testing.T) {
+	e := New()
+	_, err := e.buildPrompt([]ChatMessage{{Role: "user", Content: "hello"}}, "{{")
+	if err == nil {
+		t.Fatal("expected invalid custom template error")
+	}
+}
