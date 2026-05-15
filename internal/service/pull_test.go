@@ -290,3 +290,68 @@ func TestPullModelDeduplicatesActiveDownload(t *testing.T) {
 		t.Fatalf("requests = %d", requests.Load())
 	}
 }
+
+func TestPullModelRetriesFailedEntryWithSameID(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+	body := []byte("model")
+	sum := sha256.Sum256(body)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	id, err := manager.PullModelWithMetadata("retry-failed", server.URL+"/model.gguf", PullModelMetadata{
+		SHA256: "0000000000000000000000000000000000000000000000000000000000000000",
+	})
+	if err != nil {
+		t.Fatalf("first pull: %v", err)
+	}
+	if ds := manager.GetDownloadState(id); ds != nil {
+		<-ds.Done
+		if ds.Error == nil {
+			t.Fatal("expected first download error")
+		}
+	}
+	if entry := registry.Get(id); entry == nil || entry.Status != "error" {
+		t.Fatalf("expected failed entry, got %+v", entry)
+	}
+
+	retryID, err := manager.PullModelWithMetadata("retry-failed", server.URL+"/model.gguf", PullModelMetadata{
+		SHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("retry pull: %v", err)
+	}
+	if retryID != id {
+		t.Fatalf("retry id = %s, want %s", retryID, id)
+	}
+	if ds := manager.GetDownloadState(retryID); ds != nil {
+		<-ds.Done
+		if ds.Error != nil {
+			t.Fatalf("retry download error: %v", ds.Error)
+		}
+	}
+
+	if got := len(registry.List()); got != 1 {
+		t.Fatalf("registry entries = %d", got)
+	}
+	entry := registry.Get(id)
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	if entry.Status != "ready" {
+		t.Fatalf("expected ready status, got %s", entry.Status)
+	}
+	if entry.ErrorMessage != "" {
+		t.Fatalf("expected cleared error message, got %q", entry.ErrorMessage)
+	}
+	if entry.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("sha256 = %q", entry.SHA256)
+	}
+}

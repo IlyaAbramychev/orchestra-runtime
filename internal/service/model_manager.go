@@ -285,6 +285,9 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 	}
 
 	id := uuid.New().String()
+	if failed := m.findFailedPull(sourceURL, filePath); failed != nil {
+		id = failed.ID
+	}
 
 	meta := parseModelMetadata(filename)
 	quantization := firstNonEmpty(metadata.Quantization, meta.quantization)
@@ -317,8 +320,14 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 		DownloadedAt:        time.Now().UTC(),
 	}
 
-	if err := m.registry.Add(entry); err != nil {
-		return "", fmt.Errorf("add to registry: %w", err)
+	if failed := m.registry.Get(id); failed != nil {
+		if err := m.registry.Update(entry); err != nil {
+			return "", fmt.Errorf("update registry: %w", err)
+		}
+	} else {
+		if err := m.registry.Add(entry); err != nil {
+			return "", fmt.Errorf("add to registry: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -338,6 +347,18 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 func (m *ModelManager) findExistingPull(sourceURL, filePath string) *storage.ModelEntry {
 	for _, entry := range m.registry.List() {
 		if entry.Status == "error" {
+			continue
+		}
+		if entry.SourceURL == sourceURL || entry.FilePath == filePath {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (m *ModelManager) findFailedPull(sourceURL, filePath string) *storage.ModelEntry {
+	for _, entry := range m.registry.List() {
+		if entry.Status != "error" {
 			continue
 		}
 		if entry.SourceURL == sourceURL || entry.FilePath == filePath {
