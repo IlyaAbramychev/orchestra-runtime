@@ -167,8 +167,15 @@ func (m *ModelManager) ResolveModel(ref string) (*storage.ModelEntry, error) {
 // Concurrent first requests are serialized so the same model is not loaded
 // twice under burst traffic.
 func (m *ModelManager) EnsureLoaded(ctx context.Context, ref string) error {
+	return m.EnsureLoadedFor(ctx, ref, "")
+}
+
+func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability string) error {
 	entry, err := m.ResolveModel(ref)
 	if err != nil {
+		return err
+	}
+	if err := requireModelCapability(entry, capability); err != nil {
 		return err
 	}
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
@@ -182,10 +189,41 @@ func (m *ModelManager) EnsureLoaded(ctx context.Context, ref string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireModelCapability(entry, capability); err != nil {
+		return err
+	}
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
 		return nil
 	}
 	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptions())
+}
+
+func requireModelCapability(entry *storage.ModelEntry, capability string) error {
+	if capability == "" {
+		return nil
+	}
+	normalized := cloneModelEntry(entry)
+	switch capability {
+	case "chat":
+		if normalized.Capabilities.Chat {
+			return nil
+		}
+	case "embeddings":
+		if normalized.Capabilities.Embeddings {
+			return nil
+		}
+	case "rerank":
+		if normalized.Capabilities.Rerank {
+			return nil
+		}
+	case "tools":
+		if normalized.Capabilities.Tools {
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported model capability %q", capability)
+	}
+	return fmt.Errorf("model %s does not support %s", normalized.Name, capability)
 }
 
 // PullModel downloads a model from a URL.

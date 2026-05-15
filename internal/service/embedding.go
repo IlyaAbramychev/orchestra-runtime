@@ -29,7 +29,7 @@ func (s *EmbeddingService) SetModelLoader(loader ModelLoader) {
 
 func (s *EmbeddingService) ensureLoaded(ctx context.Context, model string) error {
 	if s.loader != nil && model != "" {
-		return s.loader.EnsureLoaded(ctx, model)
+		return s.loader.EnsureLoadedFor(ctx, model, "embeddings")
 	}
 	if !s.engine.IsLoaded() {
 		return fmt.Errorf("no model loaded")

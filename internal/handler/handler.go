@@ -52,7 +52,8 @@ func runtimeHTTPStatus(err error) int {
 	case strings.Contains(msg, "prompt too long"),
 		strings.Contains(msg, "input too long"),
 		strings.Contains(msg, "context window"),
-		strings.Contains(msg, "context_overflow"):
+		strings.Contains(msg, "context_overflow"),
+		strings.Contains(msg, "does not support"):
 		return http.StatusBadRequest
 	case strings.Contains(msg, "engine not ready"),
 		strings.Contains(msg, "worker not ready"):

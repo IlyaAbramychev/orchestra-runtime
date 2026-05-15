@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,6 +28,13 @@ func TestOllamaEmbedRejectsUnsupportedFields(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestCapabilityMismatchMapsToBadRequest(t *testing.T) {
+	status := runtimeHTTPStatus(errors.New("model chat-model does not support embeddings"))
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", status)
 	}
 }
 

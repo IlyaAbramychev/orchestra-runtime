@@ -21,6 +21,7 @@ type InferenceService struct {
 // ModelLoader resolves and loads a model for request-scoped auto-load.
 type ModelLoader interface {
 	EnsureLoaded(ctx context.Context, model string) error
+	EnsureLoadedFor(ctx context.Context, model, capability string) error
 }
 
 func NewInferenceService(eng engine.Backend, maxQueue int) *InferenceService {
@@ -40,7 +41,7 @@ func (s *InferenceService) SetModelLoader(loader ModelLoader) {
 
 func (s *InferenceService) ensureLoaded(ctx context.Context, model string) error {
 	if s.loader != nil && model != "" {
-		return s.loader.EnsureLoaded(ctx, model)
+		return s.loader.EnsureLoadedFor(ctx, model, "chat")
 	}
 	if !s.engine.IsLoaded() {
 		return fmt.Errorf("no model loaded")

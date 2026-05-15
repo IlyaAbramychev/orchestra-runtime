@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,5 +160,84 @@ func TestEmbeddingAutoLoadsRequestedModel(t *testing.T) {
 	}
 	if backend.loadedID != "embed-1" {
 		t.Fatalf("expected embed-1 loaded, got %q", backend.loadedID)
+	}
+}
+
+func TestInferenceRejectsEmbeddingOnlyModel(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "embed.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:       "embed-1",
+		Name:     "embedder",
+		Filename: "embed.gguf",
+		Status:   "ready",
+		FilePath: modelPath,
+		Capabilities: storage.ModelCapabilities{
+			Embeddings: true,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "embedder",
+		Messages: []model.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support chat") {
+		t.Fatalf("expected chat capability error, got %v", err)
+	}
+	if backend.loads != 0 {
+		t.Fatalf("expected no load, got %d", backend.loads)
+	}
+}
+
+func TestEmbeddingRejectsChatOnlyModel(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "chat.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:       "chat-1",
+		Name:     "chat-model",
+		Filename: "chat.gguf",
+		Status:   "ready",
+		FilePath: modelPath,
+		Capabilities: storage.ModelCapabilities{
+			Chat: true,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	embedding := NewEmbeddingServiceWithScheduler(scheduler)
+	embedding.SetModelLoader(manager)
+
+	_, err = embedding.EmbedForModel(context.Background(), "chat-model", []string{"hello"}, true)
+	if err == nil || !strings.Contains(err.Error(), "does not support embeddings") {
+		t.Fatalf("expected embedding capability error, got %v", err)
+	}
+	if backend.loads != 0 {
+		t.Fatalf("expected no load, got %d", backend.loads)
 	}
 }
