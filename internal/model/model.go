@@ -48,8 +48,15 @@ const (
 )
 
 type PullModelRequest struct {
-	Name      string `json:"name"`
-	SourceURL string `json:"source_url"`
+	Name                string                    `json:"name"`
+	SourceURL           string                    `json:"source_url"`
+	Quantization        string                    `json:"quantization,omitempty"`
+	Family              string                    `json:"family,omitempty"`
+	Parameters          string                    `json:"parameters,omitempty"`
+	Template            string                    `json:"template,omitempty"`
+	StopTokens          []string                  `json:"stop_tokens,omitempty"`
+	Capabilities        *ModelCapabilities        `json:"capabilities,omitempty"`
+	RecommendedSettings *RecommendedModelSettings `json:"recommended_settings,omitempty"`
 }
 
 type PullModelResponse struct {

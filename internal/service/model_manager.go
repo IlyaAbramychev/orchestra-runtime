@@ -32,6 +32,16 @@ type DownloadState struct {
 	Done            chan struct{}
 }
 
+type PullModelMetadata struct {
+	Quantization        string
+	Family              string
+	Parameters          string
+	Template            string
+	StopTokens          []string
+	Capabilities        *storage.ModelCapabilities
+	RecommendedSettings *storage.RecommendedModelSettings
+}
+
 // ModelManager handles model CRUD and lifecycle.
 type ModelManager struct {
 	registry           *storage.ModelRegistry
@@ -240,6 +250,10 @@ func requireModelCapability(entry *storage.ModelEntry, capability string) error 
 
 // PullModel downloads a model from a URL.
 func (m *ModelManager) PullModel(name, sourceURL string) (string, error) {
+	return m.PullModelWithMetadata(name, sourceURL, PullModelMetadata{})
+}
+
+func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata PullModelMetadata) (string, error) {
 	if sourceURL == "" {
 		return "", fmt.Errorf("source_url is required")
 	}
@@ -251,17 +265,30 @@ func (m *ModelManager) PullModel(name, sourceURL string) (string, error) {
 	}
 
 	meta := parseModelMetadata(filename)
+	quantization := firstNonEmpty(metadata.Quantization, meta.quantization)
+	family := firstNonEmpty(metadata.Family, meta.family)
+	parameters := firstNonEmpty(metadata.Parameters, meta.parameters)
+	capabilities := inferModelCapabilities(name, filename)
+	if metadata.Capabilities != nil {
+		capabilities = *metadata.Capabilities
+	}
+	settings := inferRecommendedSettings(modelMeta{parameters: parameters})
+	if metadata.RecommendedSettings != nil {
+		settings = *metadata.RecommendedSettings
+	}
 
 	entry := &storage.ModelEntry{
 		ID:                  id,
 		Name:                name,
 		Filename:            filename,
 		SourceURL:           sourceURL,
-		Quantization:        meta.quantization,
-		Family:              meta.family,
-		Parameters:          meta.parameters,
-		Capabilities:        inferModelCapabilities(name, filename),
-		RecommendedSettings: inferRecommendedSettings(meta),
+		Quantization:        quantization,
+		Family:              family,
+		Parameters:          parameters,
+		Template:            metadata.Template,
+		StopTokens:          append([]string(nil), metadata.StopTokens...),
+		Capabilities:        capabilities,
+		RecommendedSettings: settings,
 		Status:              "downloading",
 		FilePath:            filepath.Join(m.modelsDir, filename),
 		DownloadedAt:        time.Now().UTC(),
@@ -688,6 +715,15 @@ func inferRecommendedSettings(meta modelMeta) storage.RecommendedModelSettings {
 		settings.ContextSize = 4096
 	}
 	return settings
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func extractFilename(url string) string {

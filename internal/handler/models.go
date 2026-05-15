@@ -99,7 +99,15 @@ func (h *ModelsHandler) Pull(w http.ResponseWriter, r *http.Request) {
 		req.Name = "model"
 	}
 
-	id, err := h.manager.PullModel(req.Name, req.SourceURL)
+	id, err := h.manager.PullModelWithMetadata(req.Name, req.SourceURL, service.PullModelMetadata{
+		Quantization:        req.Quantization,
+		Family:              req.Family,
+		Parameters:          req.Parameters,
+		Template:            req.Template,
+		StopTokens:          append([]string(nil), req.StopTokens...),
+		Capabilities:        toStorageCapabilitiesPtr(req.Capabilities),
+		RecommendedSettings: toStorageRecommendedSettingsPtr(req.RecommendedSettings),
+	})
 	if err != nil {
 		slog.Error("pull model failed", "error", err)
 		writeRuntimeError(w, err)
@@ -393,8 +401,30 @@ func toModelCapabilities(c storage.ModelCapabilities) model.ModelCapabilities {
 	}
 }
 
+func toStorageCapabilitiesPtr(c *model.ModelCapabilities) *storage.ModelCapabilities {
+	if c == nil {
+		return nil
+	}
+	return &storage.ModelCapabilities{
+		Chat:       c.Chat,
+		Embeddings: c.Embeddings,
+		Rerank:     c.Rerank,
+		Tools:      c.Tools,
+		Thinking:   c.Thinking,
+	}
+}
+
 func toRecommendedSettings(s storage.RecommendedModelSettings) model.RecommendedModelSettings {
 	return model.RecommendedModelSettings{
+		ContextSize: s.ContextSize,
+	}
+}
+
+func toStorageRecommendedSettingsPtr(s *model.RecommendedModelSettings) *storage.RecommendedModelSettings {
+	if s == nil {
+		return nil
+	}
+	return &storage.RecommendedModelSettings{
 		ContextSize: s.ContextSize,
 	}
 }
