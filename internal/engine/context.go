@@ -26,14 +26,16 @@ type Engine struct {
 	// Zero disables auto-unload.
 	idleTimeout time.Duration
 	lastUsedAt  time.Time
-	idleStop    chan struct{}
+	idleTimer   *time.Timer
 }
 
 const (
-	StateIdle    = "idle"
-	StateLoading = "loading"
-	StateReady   = "ready"
-	StateError   = "error"
+	StateIdle       = "idle"
+	StateLoading    = "loading"
+	StateReady      = "ready"
+	StateGenerating = "generating"
+	StateUnloading  = "unloading"
+	StateError      = "error"
 )
 
 func New() *Engine {
@@ -46,6 +48,13 @@ func (e *Engine) SetIdleTimeout(d time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.idleTimeout = d
+	if d <= 0 {
+		e.stopIdleTimerLocked()
+		return
+	}
+	if e.state == StateReady && e.model != nil {
+		e.resetIdleTimerLocked(d)
+	}
 }
 
 // IdleTimeout returns the currently configured idle timeout (0 if disabled).
@@ -60,14 +69,16 @@ func (e *Engine) IdleTimeout() time.Duration {
 func (e *Engine) MarkUsed() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.lastUsedAt = time.Now()
+	e.markUsedLocked()
 }
 
 // ApplyKeepAlive applies a per-request keep-alive hint. Semantics (Ollama):
-//   seconds == nil   — no override, default idle timeout remains
-//   seconds == 0     — unload the model right now
-//   seconds  > 0     — stay loaded for this many seconds after last use
-//   seconds  < 0     — stay loaded forever (disables auto-unload this session)
+//
+//	seconds == nil   — no override, default idle timeout remains
+//	seconds == 0     — unload the model right now
+//	seconds  > 0     — stay loaded for this many seconds after last use
+//	seconds  < 0     — stay loaded forever (disables auto-unload this session)
+//
 // Safe to call from handler goroutines after the stream finishes.
 func (e *Engine) ApplyKeepAlive(seconds *int64) {
 	if seconds == nil {
@@ -79,71 +90,62 @@ func (e *Engine) ApplyKeepAlive(seconds *int64) {
 	}
 	e.mu.Lock()
 	if *seconds < 0 {
-		// "forever" — disable watcher by stopping it; it can be re-enabled by
-		// the next LoadModel or a server-side SetIdleTimeout call.
-		if e.idleStop != nil {
-			close(e.idleStop)
-			e.idleStop = nil
-		}
+		// "forever" — disable timer; it can be re-enabled by the next LoadModel
+		// or a server-side SetIdleTimeout call.
+		e.stopIdleTimerLocked()
 		e.idleTimeout = 0
 	} else {
 		e.idleTimeout = time.Duration(*seconds) * time.Second
-		// Restart watcher so the new timeout takes effect immediately.
 		if e.state == StateReady && e.model != nil {
-			e.startIdleWatcherLocked()
+			e.resetIdleTimerLocked(e.idleTimeout)
 		}
 	}
-	e.lastUsedAt = time.Now()
+	e.markUsedLocked()
 	e.mu.Unlock()
 }
 
-// startIdleWatcher launches a background goroutine that unloads the model
-// once `idleTimeout` elapses without a MarkUsed call. Must be invoked with
-// e.mu held and only when a model is actually loaded.
-func (e *Engine) startIdleWatcherLocked() {
-	if e.idleTimeout <= 0 {
-		return
+func (e *Engine) markUsedLocked() {
+	e.lastUsedAt = time.Now()
+	if e.idleTimeout > 0 && e.state == StateReady && e.model != nil {
+		e.resetIdleTimerLocked(e.idleTimeout)
 	}
-	// Stop any previous watcher (defensive — LoadModel already unloads first).
-	if e.idleStop != nil {
-		close(e.idleStop)
-	}
-	stop := make(chan struct{})
-	e.idleStop = stop
-	timeout := e.idleTimeout
-	go e.idleWatcher(stop, timeout)
 }
 
-func (e *Engine) idleWatcher(stop chan struct{}, timeout time.Duration) {
-	// Check a bit more often than the timeout so the latency of auto-unload
-	// is at most ~10% of the window.
-	tick := timeout / 10
-	if tick < 30*time.Second {
-		tick = 30 * time.Second
+func (e *Engine) resetIdleTimerLocked(d time.Duration) {
+	if d <= 0 {
+		e.stopIdleTimerLocked()
+		return
 	}
-	t := time.NewTicker(tick)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			e.mu.Lock()
-			if e.state != StateReady || e.model == nil {
-				e.mu.Unlock()
-				return
-			}
-			if time.Since(e.lastUsedAt) >= timeout {
-				slog.Info("idle auto-unload triggered",
-					"model_id", e.modelID,
-					"idle_for", time.Since(e.lastUsedAt).Round(time.Second))
-				e.unloadLocked()
-				e.mu.Unlock()
-				return
-			}
-			e.mu.Unlock()
-		}
+	if e.idleTimer != nil {
+		e.idleTimer.Reset(d)
+		return
 	}
+	e.idleTimer = time.AfterFunc(d, e.onIdleTimer)
+}
+
+func (e *Engine) stopIdleTimerLocked() {
+	if e.idleTimer != nil {
+		e.idleTimer.Stop()
+		e.idleTimer = nil
+	}
+}
+
+func (e *Engine) onIdleTimer() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state != StateReady || e.model == nil || e.idleTimeout <= 0 {
+		e.idleTimer = nil
+		return
+	}
+	idleFor := time.Since(e.lastUsedAt)
+	if idleFor < e.idleTimeout {
+		e.resetIdleTimerLocked(e.idleTimeout - idleFor)
+		return
+	}
+	slog.Info("idle auto-unload triggered",
+		"model_id", e.modelID,
+		"idle_for", idleFor.Round(time.Second))
+	e.unloadLocked()
 }
 
 func (e *Engine) InitBackend() {
@@ -160,19 +162,21 @@ func (e *Engine) FreeBackend() {
 // back to sensible defaults via `normalize()`.
 //
 // Callers should set explicitly:
-//   GPULayers    number of layers on GPU (-1 = all, 0 = CPU only)
-//   CtxSize      n_ctx; ≤ model's trained ctx to avoid RoPE extrapolation
-//   Threads      CPU threads for inference; 0 = auto
+//
+//	GPULayers    number of layers on GPU (-1 = all, 0 = CPU only)
+//	CtxSize      n_ctx; ≤ model's trained ctx to avoid RoPE extrapolation
+//	Threads      CPU threads for inference; 0 = auto
 //
 // Advanced (leave zero to inherit llama.cpp's default):
-//   BatchSize       n_batch, ≥ NCtx is fine but rarely needed
-//   RopeFreqBase    override RoPE base (0 = from GGUF)
-//   RopeFreqScale   override RoPE scale (0 = from GGUF)
-//   FlashAttn       -1 auto (default), 0 off, 1 on
-//   OffloadKQV      move KV cache to GPU (true on GPU systems)
-//   UseMmap         mmap the GGUF (true by default; false = full RAM copy)
-//   UseMlock        pin pages in RAM (guarantees no swap)
-//   TypeK/TypeV     KV cache quant: "" (f16 default), "q8_0", "q4_0", …
+//
+//	BatchSize       n_batch, ≥ NCtx is fine but rarely needed
+//	RopeFreqBase    override RoPE base (0 = from GGUF)
+//	RopeFreqScale   override RoPE scale (0 = from GGUF)
+//	FlashAttn       -1 auto (default), 0 off, 1 on
+//	OffloadKQV      move KV cache to GPU (true on GPU systems)
+//	UseMmap         mmap the GGUF (true by default; false = full RAM copy)
+//	UseMlock        pin pages in RAM (guarantees no swap)
+//	TypeK/TypeV     KV cache quant: "" (f16 default), "q8_0", "q4_0", …
 type LoadOptions struct {
 	GPULayers     int
 	CtxSize       int
@@ -297,10 +301,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	e.modelID = modelID
 	e.modelPath = path
 	e.state = StateReady
-	e.lastUsedAt = time.Now()
-
-	// Kick off the idle-unload watcher for this load session.
-	e.startIdleWatcherLocked()
+	e.markUsedLocked()
 
 	slog.Info("model loaded",
 		"id", modelID,
@@ -322,10 +323,7 @@ func (e *Engine) UnloadModel() {
 }
 
 func (e *Engine) unloadLocked() {
-	if e.idleStop != nil {
-		close(e.idleStop)
-		e.idleStop = nil
-	}
+	e.stopIdleTimerLocked()
 	if e.sampler != nil {
 		e.sampler.Free()
 		e.sampler = nil

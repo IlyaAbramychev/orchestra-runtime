@@ -1,5 +1,7 @@
 package model
 
+import "encoding/json"
+
 // Ollama-compatible /api/generate shapes.
 // Spec: https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-completion
 
@@ -12,6 +14,11 @@ type GenerateRequest struct {
 	Raw    bool   `json:"raw,omitempty"`
 	Stream *bool  `json:"stream,omitempty"` // default true
 	System string `json:"system,omitempty"`
+
+	Format   json.RawMessage `json:"format,omitempty"`
+	Template string          `json:"template,omitempty"`
+	Context  []int           `json:"context,omitempty"`
+	Suffix   string          `json:"suffix,omitempty"`
 
 	// Mirrors ChatCompletionRequest sampling.
 	Options   *GenerateOptions `json:"options,omitempty"`
@@ -46,10 +53,11 @@ type GenerateResponse struct {
 	CreatedAt string `json:"created_at"`
 
 	// Final-chunk fields (zero on intermediate chunks).
-	TotalDurationNs      int64 `json:"total_duration,omitempty"`
-	PromptEvalDurationNs int64 `json:"prompt_eval_duration,omitempty"`
-	PromptEvalCount      int   `json:"prompt_eval_count,omitempty"`
-	EvalDurationNs       int64 `json:"eval_duration,omitempty"`
-	EvalCount            int   `json:"eval_count,omitempty"`
+	TotalDurationNs      int64  `json:"total_duration,omitempty"`
+	PromptEvalDurationNs int64  `json:"prompt_eval_duration,omitempty"`
+	PromptEvalCount      int    `json:"prompt_eval_count,omitempty"`
+	EvalDurationNs       int64  `json:"eval_duration,omitempty"`
+	EvalCount            int    `json:"eval_count,omitempty"`
 	DoneReason           string `json:"done_reason,omitempty"`
+	Error                string `json:"error,omitempty"`
 }

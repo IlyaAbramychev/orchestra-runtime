@@ -301,12 +301,14 @@ func (c *llamaContext) EmbeddingsIth(i int, nEmbd int) []float32 {
 // --- Batch ---
 
 type llamaBatch struct {
-	b C.struct_llama_batch
+	b        C.struct_llama_batch
+	capacity int
 }
 
 func llamaBatchInit(nTokens, nSeqMax int) *llamaBatch {
 	return &llamaBatch{
-		b: C.llama_batch_init(C.int32_t(nTokens), 0, C.int32_t(nSeqMax)),
+		b:        C.llama_batch_init(C.int32_t(nTokens), 0, C.int32_t(nSeqMax)),
+		capacity: nTokens,
 	}
 }
 
@@ -318,8 +320,12 @@ func (b *llamaBatch) Clear() {
 	C.bridge_batch_clear(&b.b)
 }
 
-func (b *llamaBatch) Add(token Token, pos int, seqID int, logits bool) {
+func (b *llamaBatch) Add(token Token, pos int, seqID int, logits bool) error {
+	if b.NTokens() >= b.capacity {
+		return fmt.Errorf("llama batch capacity exceeded: %d >= %d", b.NTokens(), b.capacity)
+	}
 	C.bridge_batch_add(&b.b, token, C.llama_pos(pos), C.llama_seq_id(seqID), C.bool(logits))
+	return nil
 }
 
 func (b *llamaBatch) NTokens() int {
@@ -334,20 +340,6 @@ func llamaDecode(ctx *llamaContext, batch *llamaBatch) error {
 		return fmt.Errorf("llama_decode failed with code %d", int(ret))
 	}
 	return nil
-}
-
-// --- Logits ---
-
-func llamaGetLogitsIth(ctx *llamaContext, i int) []float32 {
-	model := C.llama_get_model(ctx.ptr)
-	vocab := C.llama_model_get_vocab(model)
-	nVocab := int(C.llama_vocab_n_tokens(vocab))
-
-	logitsPtr := C.llama_get_logits_ith(ctx.ptr, C.int32_t(i))
-	if logitsPtr == nil {
-		return nil
-	}
-	return unsafe.Slice((*float32)(unsafe.Pointer(logitsPtr)), nVocab)
 }
 
 // --- Sampler ---
@@ -401,7 +393,8 @@ func NewSamplerChain(o SamplerOpts) *llamaSampler {
 	}
 
 	// Mirostat replaces top_k/top_p entirely — skip truncation if enabled.
-	if o.Mirostat == 1 {
+	switch o.Mirostat {
+	case 1:
 		tau := o.MirostatTau
 		if tau == 0 {
 			tau = 5.0
@@ -412,7 +405,7 @@ func NewSamplerChain(o SamplerOpts) *llamaSampler {
 		}
 		C.llama_sampler_chain_add(chain,
 			C.llama_sampler_init_mirostat(C.int32_t(o.NVocab), C.uint32_t(o.Seed), C.float(tau), C.float(eta), 100))
-	} else if o.Mirostat == 2 {
+	case 2:
 		tau := o.MirostatTau
 		if tau == 0 {
 			tau = 5.0
@@ -423,7 +416,7 @@ func NewSamplerChain(o SamplerOpts) *llamaSampler {
 		}
 		C.llama_sampler_chain_add(chain,
 			C.llama_sampler_init_mirostat_v2(C.uint32_t(o.Seed), C.float(tau), C.float(eta)))
-	} else {
+	default:
 		// Standard truncation stack.
 		if o.TopK > 0 {
 			C.llama_sampler_chain_add(chain, C.llama_sampler_init_top_k(C.int32_t(o.TopK)))
@@ -477,6 +470,10 @@ type ChatMessage struct {
 }
 
 func ApplyChatTemplate(tmpl string, messages []ChatMessage, addAssistant bool) (string, error) {
+	if len(messages) == 0 {
+		return "", fmt.Errorf("no messages")
+	}
+
 	cMsgs := make([]C.struct_llama_chat_message, len(messages))
 	cStrings := make([]*C.char, len(messages)*2) // keep alive
 

@@ -1,8 +1,14 @@
 package handler
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
+
+	"github.com/operium/orchestra-runtime/internal/rpc"
 )
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -15,6 +21,58 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+func writeRuntimeError(w http.ResponseWriter, err error) {
+	writeError(w, runtimeHTTPStatus(err), err.Error())
+}
+
+func runtimeHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusInternalServerError
+	}
+	var badReq *badRequestErr
+	if errors.As(err, &badReq) {
+		return http.StatusBadRequest
+	}
+	if errors.Is(err, context.Canceled) {
+		return 499
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	if errors.Is(err, rpc.ErrWorkerCrashed) {
+		return http.StatusServiceUnavailable
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "queue full"):
+		return http.StatusTooManyRequests
+	case strings.Contains(msg, "no model loaded"),
+		strings.Contains(msg, "model not found"):
+		return http.StatusNotFound
+	case strings.Contains(msg, "prompt too long"),
+		strings.Contains(msg, "input too long"),
+		strings.Contains(msg, "context window"),
+		strings.Contains(msg, "context_overflow"):
+		return http.StatusBadRequest
+	case strings.Contains(msg, "engine not ready"),
+		strings.Contains(msg, "worker not ready"):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 func readJSON(r *http.Request, v interface{}) error {
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func hasMeaningfulRawJSON(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	if bytes.Equal(trimmed, []byte("{}")) || bytes.Equal(trimmed, []byte("[]")) {
+		return false
+	}
+	return true
 }

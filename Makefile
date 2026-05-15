@@ -4,6 +4,8 @@ WORKER_BINARY = orchestra-worker
 # surfaced to clients by GET /api/system. Leave unset for dev builds — the
 # default picks a short git SHA so mismatches between builds are obvious.
 VERSION ?= dev-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+LLAMA_CPP_COMMIT ?= $(shell git -C $(LLAMA_DIR) rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DIR = bin
 LLAMA_DIR = llama.cpp
 LLAMA_BUILD_DIR = build/llama
@@ -81,8 +83,13 @@ GGML_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/ggml/include
 BASE_CGO = CGO_ENABLED=1 CGO_CFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE)"
 BASE_LDFLAGS = -L$(LLAMA_LIB) -L$(GGML_LIB) -lllama -lggml -lstdc++ -lm
 METAL_LDFLAGS = -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
-GO_BUILD = go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/server
-GO_BUILD_WORKER = go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(WORKER_BINARY) ./cmd/worker
+TEST_LDFLAGS = $(BASE_LDFLAGS)
+ifeq ($(shell uname -s),Darwin)
+TEST_LDFLAGS = $(METAL_LDFLAGS)
+endif
+GO_LDFLAGS = -s -w -X main.version=$(VERSION) -X main.buildCommit=$(BUILD_COMMIT) -X main.llamaCppCommit=$(LLAMA_CPP_COMMIT)
+GO_BUILD = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/server
+GO_BUILD_WORKER = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(WORKER_BINARY) ./cmd/worker
 
 # HOST binary (./cmd/server) does NOT need CGo in subprocess mode. We still
 # link against llama.cpp for in-process mode (the default) so users keep the
@@ -124,7 +131,7 @@ run:
 
 .PHONY: test
 test:
-	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS)" go test ./... -v
+	$(BASE_CGO) CGO_LDFLAGS="$(TEST_LDFLAGS)" go test ./... -v
 
 .PHONY: lint
 lint:

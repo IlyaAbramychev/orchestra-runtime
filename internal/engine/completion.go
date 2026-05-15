@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -120,7 +121,7 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	defer e.mu.Unlock()
 	// Reset idle timer on every completion request so actively-used models
 	// don't get auto-unloaded mid-session.
-	defer func() { e.lastUsedAt = time.Now() }()
+	defer e.markUsedLocked()
 
 	if e.state != StateReady {
 		return nil, fmt.Errorf("engine not ready (state: %s)", e.state)
@@ -175,6 +176,9 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	defer batch.Free()
 
 	for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		endIdx := startIdx + prefillBatchSize
 		if endIdx > len(tokens) {
 			endIdx = len(tokens)
@@ -182,7 +186,9 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 		batch.Clear()
 		for i := startIdx; i < endIdx; i++ {
 			logits := i == len(tokens)-1
-			batch.Add(tokens[i], i, 0, logits)
+			if err := batch.Add(tokens[i], i, 0, logits); err != nil {
+				return nil, err
+			}
 		}
 		if err := llamaDecode(e.ctx, batch); err != nil {
 			return nil, fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)
@@ -221,14 +227,17 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 		nGen++
 
 		// Check stop sequences
-		if shouldStop(string(generated), params.Stop) {
+		if trimmed, ok := trimAtStop(string(generated), params.Stop); ok {
+			generated = []byte(trimmed)
 			finishReason = "stop"
 			break
 		}
 
 		// Prepare next batch
 		batch.Clear()
-		batch.Add(token, pos, 0, true)
+		if err := batch.Add(token, pos, 0, true); err != nil {
+			return nil, err
+		}
 		pos++
 
 		if err := llamaDecode(e.ctx, batch); err != nil {
@@ -255,7 +264,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 
 	e.mu.Lock()
 	// Reset idle timer up front so the watcher doesn't fire while we generate.
-	e.lastUsedAt = time.Now()
+	e.markUsedLocked()
 
 	if e.state != StateReady {
 		e.mu.Unlock()
@@ -303,7 +312,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		defer close(ch)
 		// Stamp usage again at end-of-stream so long generations don't get
 		// auto-unloaded right after finishing.
-		defer func() { e.lastUsedAt = time.Now() }()
+		defer e.markUsedLocked()
 
 		// Defense-in-depth: if llama.cpp panics via CGo (rare, but happens on
 		// some Metal edge cases), don't take down the whole runtime process —
@@ -333,6 +342,10 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		defer batch.Free()
 
 		for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
+			if err := ctx.Err(); err != nil {
+				ch <- CompletionChunk{Err: err}
+				return
+			}
 			endIdx := startIdx + prefillBatchSize
 			if endIdx > len(tokens) {
 				endIdx = len(tokens)
@@ -340,7 +353,10 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 			batch.Clear()
 			for i := startIdx; i < endIdx; i++ {
 				logits := i == len(tokens)-1
-				batch.Add(tokens[i], i, 0, logits)
+				if err := batch.Add(tokens[i], i, 0, logits); err != nil {
+					ch <- CompletionChunk{Err: err}
+					return
+				}
 			}
 			if err := llamaDecode(e.ctx, batch); err != nil {
 				ch <- CompletionChunk{Err: fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)}
@@ -368,7 +384,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 			}
 		}
 
-		var generated []byte
+		stopFilter := newStopStreamFilter(params.Stop)
 		var pendingBytes []byte // incomplete UTF-8 tail from previous iteration
 		nGen := 0
 		pos := nPrompt
@@ -376,7 +392,12 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		for nGen < maxTokens {
 			if ctx.Err() != nil {
 				if len(pendingBytes) > 0 {
-					ch <- CompletionChunk{Text: string(pendingBytes)}
+					if out := stopFilter.Push(string(pendingBytes)); out != "" {
+						ch <- CompletionChunk{Text: out}
+					}
+				}
+				if out := stopFilter.Flush(); out != "" {
+					ch <- CompletionChunk{Text: out}
 				}
 				ch <- finalize("stop", nGen)
 				return
@@ -387,14 +408,18 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 
 			if e.vocab.IsEOG(token) {
 				if len(pendingBytes) > 0 {
-					ch <- CompletionChunk{Text: string(pendingBytes)}
+					if out := stopFilter.Push(string(pendingBytes)); out != "" {
+						ch <- CompletionChunk{Text: out}
+					}
+				}
+				if out := stopFilter.Flush(); out != "" {
+					ch <- CompletionChunk{Text: out}
 				}
 				ch <- finalize("stop", nGen)
 				return
 			}
 
 			piece := e.vocab.TokenToStr(token)
-			generated = append(generated, piece...)
 			nGen++
 
 			// UTF-8 safe streaming: emit only valid prefix, carry incomplete tail.
@@ -402,19 +427,21 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 			complete, pending := splitUTF8(buffer)
 			pendingBytes = pending
 			if len(complete) > 0 {
-				ch <- CompletionChunk{Text: string(complete)}
-			}
-
-			if shouldStop(string(generated), params.Stop) {
-				if len(pendingBytes) > 0 {
-					ch <- CompletionChunk{Text: string(pendingBytes)}
+				out, stopped := stopFilter.PushCheck(string(complete))
+				if out != "" {
+					ch <- CompletionChunk{Text: out}
 				}
-				ch <- finalize("stop", nGen)
-				return
+				if stopped {
+					ch <- finalize("stop", nGen)
+					return
+				}
 			}
 
 			batch.Clear()
-			batch.Add(token, pos, 0, true)
+			if err := batch.Add(token, pos, 0, true); err != nil {
+				ch <- CompletionChunk{Err: err}
+				return
+			}
 			pos++
 
 			if err := llamaDecode(e.ctx, batch); err != nil {
@@ -425,7 +452,12 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 
 		// Hit max_tokens — flush any pending UTF-8 tail before finishing
 		if len(pendingBytes) > 0 {
-			ch <- CompletionChunk{Text: string(pendingBytes)}
+			if out := stopFilter.Push(string(pendingBytes)); out != "" {
+				ch <- CompletionChunk{Text: out}
+			}
+		}
+		if out := stopFilter.Flush(); out != "" {
+			ch <- CompletionChunk{Text: out}
 		}
 		ch <- finalize("length", nGen)
 	}()
@@ -497,14 +529,64 @@ func (e *Engine) createSampler(params CompletionParams) *llamaSampler {
 	})
 }
 
-func shouldStop(text string, stopSeqs []string) bool {
+func trimAtStop(text string, stopSeqs []string) (string, bool) {
+	idx := -1
 	for _, stop := range stopSeqs {
-		if stop != "" && len(text) >= len(stop) {
-			tail := text[len(text)-len(stop):]
-			if tail == stop {
-				return true
-			}
+		if stop == "" {
+			continue
+		}
+		if i := strings.Index(text, stop); i >= 0 && (idx == -1 || i < idx) {
+			idx = i
 		}
 	}
-	return false
+	if idx == -1 {
+		return text, false
+	}
+	return text[:idx], true
+}
+
+type stopStreamFilter struct {
+	stops      []string
+	maxStopLen int
+	hold       string
+}
+
+func newStopStreamFilter(stops []string) *stopStreamFilter {
+	f := &stopStreamFilter{stops: stops}
+	for _, stop := range stops {
+		if len(stop) > f.maxStopLen {
+			f.maxStopLen = len(stop)
+		}
+	}
+	return f
+}
+
+func (f *stopStreamFilter) Push(text string) string {
+	out, _ := f.PushCheck(text)
+	return out
+}
+
+func (f *stopStreamFilter) PushCheck(text string) (string, bool) {
+	if len(f.stops) == 0 || f.maxStopLen == 0 {
+		return text, false
+	}
+	f.hold += text
+	if trimmed, ok := trimAtStop(f.hold, f.stops); ok {
+		f.hold = ""
+		return trimmed, true
+	}
+	keep := f.maxStopLen - 1
+	if keep <= 0 || len(f.hold) <= keep {
+		return "", false
+	}
+	emitLen := len(f.hold) - keep
+	out := f.hold[:emitLen]
+	f.hold = f.hold[emitLen:]
+	return out, false
+}
+
+func (f *stopStreamFilter) Flush() string {
+	out := f.hold
+	f.hold = ""
+	return out
 }

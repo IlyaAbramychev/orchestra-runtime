@@ -26,6 +26,7 @@ type Server struct {
 	router     *chi.Mux
 	httpServer *http.Server
 	backend    engine.Backend
+	scheduler  *service.RuntimeScheduler
 	// Retained so Shutdown can call Close on the right owner.
 	ownsEngine bool
 	logs       *logbuf.Handler
@@ -80,11 +81,17 @@ func (s *Server) Start() error {
 	}
 
 	// Initialize services
-	modelMgr := service.NewModelManager(registry, s.backend, s.cfg.ModelsDir)
-	inferSvc := service.NewInferenceService(s.backend, s.cfg.MaxQueueSize)
+	scheduler := service.NewRuntimeScheduler(s.backend, s.cfg.MaxQueueSize)
+	s.scheduler = scheduler
+	modelMgr := service.NewModelManagerWithScheduler(registry, scheduler, s.cfg.ModelsDir)
+	modelMgr.SetDefaultLoadOptions(defaultLoadOptionsFromConfig(s.cfg))
+	inferSvc := service.NewInferenceServiceWithScheduler(scheduler)
+	inferSvc.SetModelLoader(modelMgr)
 	sysInfo := service.NewSystemInfo(s.backend)
+	sysInfo.SetScheduler(scheduler)
 
-	embedSvc := service.NewEmbeddingService(s.backend, inferSvc)
+	embedSvc := service.NewEmbeddingServiceWithScheduler(scheduler)
+	embedSvc.SetModelLoader(modelMgr)
 
 	// Initialize handlers
 	chatH := handler.NewChatHandler(inferSvc)
@@ -148,12 +155,12 @@ func (s *Server) buildRouter(
 
 		// OpenAI-compatible endpoints
 		r.Post("/v1/chat/completions", chatH.ChatCompletion)
-		r.Post("/v1/completions", genH.Generate) // OpenAI legacy completions → Ollama-style raw prompt
+		r.Post("/v1/completions", genH.Completion)
 		r.Post("/v1/embeddings", embH.EmbedOpenAI)
 		r.Get("/v1/models", modelsH.ListOpenAI)
 
 		// Ollama-compatible endpoints
-		r.Post("/api/chat", chatH.ChatCompletion)
+		r.Post("/api/chat", chatH.ChatOllama)
 		r.Post("/api/generate", genH.Generate)
 		r.Post("/api/embed", embH.Embed)
 		r.Post("/api/embeddings", embH.Embed) // legacy Ollama alias
@@ -173,6 +180,7 @@ func (s *Server) buildRouter(
 		})
 
 		// System info
+		r.Get("/api/health", systemH.Health)
 		r.Get("/api/system", systemH.Info)
 
 		// Admin / operational
@@ -185,7 +193,13 @@ func (s *Server) buildRouter(
 
 func (s *Server) Shutdown() {
 	if s.backend != nil {
-		s.backend.UnloadModel()
+		if s.scheduler != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+			_ = s.scheduler.UnloadModel(ctx)
+			cancel()
+		} else {
+			s.backend.UnloadModel()
+		}
 		if s.ownsEngine {
 			s.backend.FreeBackend()
 		} else {
@@ -211,4 +225,12 @@ func parseLogLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+func defaultLoadOptionsFromConfig(cfg *config.Config) engine.LoadOptions {
+	opts := engine.DefaultLoadOptions()
+	opts.GPULayers = cfg.DefaultGPULayers
+	opts.CtxSize = cfg.ContextSize
+	opts.Threads = cfg.Threads
+	return opts
 }

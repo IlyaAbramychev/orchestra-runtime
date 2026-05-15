@@ -65,19 +65,22 @@ type LoadModelRequest struct {
 	KVCacheQuantV  *string `json:"kv_cache_quant_v,omitempty"`
 
 	// Memory placement
-	UseMmap          *bool `json:"use_mmap,omitempty"`           // default true
-	KeepModelInRAM   *bool `json:"keep_model_in_memory,omitempty"` // use_mlock
+	UseMmap        *bool `json:"use_mmap,omitempty"`             // default true
+	KeepModelInRAM *bool `json:"keep_model_in_memory,omitempty"` // use_mlock
 }
 
 type ModelStatusResponse struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	Status          string  `json:"status"`
+	ID               string  `json:"id"`
+	Name             string  `json:"name"`
+	Status           string  `json:"status"`
+	RuntimeState     string  `json:"runtime_state"`
+	Active           bool    `json:"active"`
+	QueueDepth       int     `json:"queue_depth"`
 	DownloadProgress float64 `json:"download_progress,omitempty"`
-	DownloadedBytes int64   `json:"downloaded_bytes,omitempty"`
-	TotalBytes      int64   `json:"total_bytes,omitempty"`
-	SpeedBPS        int64   `json:"speed_bytes_per_sec,omitempty"`
-	ErrorMessage    string  `json:"error_message,omitempty"`
+	DownloadedBytes  int64   `json:"downloaded_bytes,omitempty"`
+	TotalBytes       int64   `json:"total_bytes,omitempty"`
+	SpeedBPS         int64   `json:"speed_bytes_per_sec,omitempty"`
+	ErrorMessage     string  `json:"error_message,omitempty"`
 }
 
 // OpenAIModel is the OpenAI-compatible model list entry.

@@ -15,12 +15,16 @@ import (
 // version is overridden at build time by `-ldflags="-X main.version=..."`
 // (see Makefile). Defaults to "dev" so a hand-built binary is obvious.
 var version = "dev"
+var buildCommit = "unknown"
+var llamaCppCommit = "unknown"
 
 func main() {
 	// Propagate the ldflags-injected version into /api/system so the
 	// Operium Orchestra extension can show "dev" for local builds vs the
 	// released tag for prod artefacts.
 	service.Version = version
+	service.BuildCommit = buildCommit
+	service.LlamaCppCommit = llamaCppCommit
 
 	// Promote memory faults in Go code to recoverable panics — still won't
 	// rescue C-thread SIGSEGVs from llama.cpp / Metal (those bypass Go's

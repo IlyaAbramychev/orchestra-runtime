@@ -31,6 +31,10 @@ import (
 	"github.com/operium/orchestra-runtime/internal/rpc"
 )
 
+var version = "dev"
+var buildCommit = "unknown"
+var llamaCppCommit = "unknown"
+
 func main() {
 	debug.SetPanicOnFault(true)
 
@@ -59,20 +63,23 @@ func main() {
 	eng.InitBackend()
 	defer eng.Close()
 
-	w := &worker{
-		engine:    eng,
-		streamCtx: make(map[string]context.CancelFunc),
-	}
-
 	// Graceful shutdown on SIGTERM from supervisor.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	w := &worker{
+		engine:    eng,
+		streamCtx: make(map[string]context.CancelFunc),
+		shutdown:  cancel,
+	}
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		slog.Info("worker shutting down")
 		cancel()
+	}()
+	go func() {
+		<-ctx.Done()
 		ln.Close()
 	}()
 
@@ -103,6 +110,7 @@ type worker struct {
 
 	mu        sync.Mutex
 	streamCtx map[string]context.CancelFunc // id → cancel fn for in-flight streams
+	shutdown  context.CancelFunc
 }
 
 func (w *worker) serve(ctx context.Context, conn net.Conn) {
@@ -227,10 +235,10 @@ func (w *worker) dispatch(ctx context.Context, c *rpc.Codec, env *rpc.Envelope) 
 
 	case rpc.MethodShutdown:
 		_ = c.Write(finalOK(env.ID, map[string]bool{"ok": true}))
-		// Exit the process cleanly. defer'd teardown in main() runs.
 		go func() {
 			time.Sleep(50 * time.Millisecond) // let the reply flush
-			os.Exit(0)
+			w.shutdown()
+			_ = c.Close()
 		}()
 
 	default:

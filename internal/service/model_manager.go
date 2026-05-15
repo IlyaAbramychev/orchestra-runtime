@@ -34,40 +34,148 @@ type DownloadState struct {
 
 // ModelManager handles model CRUD and lifecycle.
 type ModelManager struct {
-	registry  *storage.ModelRegistry
-	engine    engine.Backend
-	modelsDir string
-	downloads sync.Map // id -> *DownloadState
+	registry           *storage.ModelRegistry
+	engine             engine.Backend
+	scheduler          *RuntimeScheduler
+	modelsDir          string
+	defaultLoadOptions engine.LoadOptions
+	loadMu             sync.Mutex
+	downloads          sync.Map // id -> *DownloadState
 }
 
 func NewModelManager(registry *storage.ModelRegistry, eng engine.Backend, modelsDir string) *ModelManager {
 	return &ModelManager{
-		registry:  registry,
-		engine:    eng,
-		modelsDir: modelsDir,
+		registry:           registry,
+		engine:             eng,
+		modelsDir:          modelsDir,
+		defaultLoadOptions: engine.DefaultLoadOptions(),
 	}
+}
+
+func NewModelManagerWithScheduler(registry *storage.ModelRegistry, scheduler *RuntimeScheduler, modelsDir string) *ModelManager {
+	return &ModelManager{
+		registry:           registry,
+		engine:             scheduler.Backend(),
+		scheduler:          scheduler,
+		modelsDir:          modelsDir,
+		defaultLoadOptions: engine.DefaultLoadOptions(),
+	}
+}
+
+func (m *ModelManager) SetDefaultLoadOptions(opts engine.LoadOptions) {
+	m.defaultLoadOptions = opts
+}
+
+func (m *ModelManager) DefaultLoadOptions() engine.LoadOptions {
+	return m.defaultLoadOptions
 }
 
 // List returns all models in the registry.
 func (m *ModelManager) List() []*storage.ModelEntry {
 	entries := m.registry.List()
-	// Update status for the loaded model
-	loadedID := m.engine.LoadedModelID()
-	for _, e := range entries {
-		if e.ID == loadedID && e.Status == "ready" {
-			e.Status = "loaded"
+	result := make([]*storage.ModelEntry, 0, len(entries))
+	for _, entry := range entries {
+		copy := cloneModelEntry(entry)
+		if copy.Status == "ready" {
+			if status := m.RuntimeStatus(copy.ID); status != "" {
+				copy.Status = status
+			}
 		}
+		result = append(result, copy)
 	}
-	return entries
+	return result
 }
 
 // Get returns a single model entry.
 func (m *ModelManager) Get(id string) *storage.ModelEntry {
 	entry := m.registry.Get(id)
-	if entry != nil && entry.ID == m.engine.LoadedModelID() && entry.Status == "ready" {
-		entry.Status = "loaded"
+	if entry == nil {
+		return nil
 	}
-	return entry
+	copy := cloneModelEntry(entry)
+	if copy.Status == "ready" {
+		if status := m.RuntimeStatus(copy.ID); status != "" {
+			copy.Status = status
+		}
+	}
+	return copy
+}
+
+func (m *ModelManager) RuntimeStatus(id string) string {
+	if m.scheduler != nil {
+		if m.scheduler.ActiveModelID() == id {
+			return m.scheduler.State()
+		}
+	}
+	if id == m.engine.LoadedModelID() && m.engine.IsLoaded() {
+		return "loaded"
+	}
+	return ""
+}
+
+func (m *ModelManager) RuntimeSnapshot() RuntimeSnapshot {
+	if m.scheduler != nil {
+		return m.scheduler.Snapshot()
+	}
+	return RuntimeSnapshot{
+		State:         m.engine.State(),
+		ActiveModelID: m.engine.LoadedModelID(),
+	}
+}
+
+func cloneModelEntry(entry *storage.ModelEntry) *storage.ModelEntry {
+	if entry == nil {
+		return nil
+	}
+	copy := *entry
+	return &copy
+}
+
+// ResolveModel finds a model by registry id, display name, filename, or
+// filename stem. This mirrors how Ollama/OpenAI clients usually address
+// models while keeping registry IDs stable for internal management.
+func (m *ModelManager) ResolveModel(ref string) (*storage.ModelEntry, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil, fmt.Errorf("model is required")
+	}
+	if entry := m.registry.Get(ref); entry != nil {
+		return entry, nil
+	}
+	for _, entry := range m.registry.List() {
+		if entry.Name == ref || entry.Filename == ref {
+			return entry, nil
+		}
+		if strings.TrimSuffix(entry.Filename, filepath.Ext(entry.Filename)) == ref {
+			return entry, nil
+		}
+	}
+	return nil, fmt.Errorf("model %s not found", ref)
+}
+
+// EnsureLoaded resolves a request model reference and loads it if necessary.
+// Concurrent first requests are serialized so the same model is not loaded
+// twice under burst traffic.
+func (m *ModelManager) EnsureLoaded(ctx context.Context, ref string) error {
+	entry, err := m.ResolveModel(ref)
+	if err != nil {
+		return err
+	}
+	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
+		return nil
+	}
+
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+
+	entry, err = m.ResolveModel(ref)
+	if err != nil {
+		return err
+	}
+	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
+		return nil
+	}
+	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptions())
 }
 
 // PullModel downloads a model from a URL.
@@ -234,7 +342,9 @@ func (m *ModelManager) DeleteModel(id string) error {
 
 	// Unload if currently loaded
 	if m.engine.LoadedModelID() == id {
-		m.engine.UnloadModel()
+		if err := m.unloadCurrentModel(context.Background()); err != nil {
+			return err
+		}
 	}
 
 	// Remove file (only if not externally imported, e.g. from LM Studio)
@@ -351,6 +461,10 @@ func deriveModelName(rootDir, fullPath, filename string) string {
 // ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1. This is a backstop for the UI check;
 // external HTTP clients and older extensions are also protected.
 func (m *ModelManager) LoadModel(id string, opts engine.LoadOptions) error {
+	return m.LoadModelWithContext(context.Background(), id, opts)
+}
+
+func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts engine.LoadOptions) error {
 	entry := m.registry.Get(id)
 	if entry == nil {
 		return fmt.Errorf("model %s not found", id)
@@ -422,12 +536,26 @@ func (m *ModelManager) LoadModel(id string, opts engine.LoadOptions) error {
 		}
 	}
 
+	if m.scheduler != nil {
+		return m.scheduler.LoadModel(ctx, id, entry.FilePath, opts)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.engine.LoadModel(id, entry.FilePath, opts)
 }
 
 // UnloadModel unloads the current model.
 func (m *ModelManager) UnloadModel() {
+	_ = m.unloadCurrentModel(context.Background())
+}
+
+func (m *ModelManager) unloadCurrentModel(ctx context.Context) error {
+	if m.scheduler != nil {
+		return m.scheduler.UnloadModel(ctx)
+	}
 	m.engine.UnloadModel()
+	return nil
 }
 
 // --- Helpers ---

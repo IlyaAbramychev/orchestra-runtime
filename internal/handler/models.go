@@ -25,7 +25,7 @@ func (h *ModelsHandler) ListOpenAI(w http.ResponseWriter, r *http.Request) {
 	entries := h.manager.List()
 	data := make([]model.OpenAIModel, 0, len(entries))
 	for _, e := range entries {
-		if e.Status == "ready" || e.Status == "loaded" {
+		if modelAvailableForInference(e.Status) {
 			data = append(data, model.OpenAIModel{
 				ID:      e.Name,
 				Object:  "model",
@@ -68,7 +68,7 @@ func (h *ModelsHandler) Import(w http.ResponseWriter, r *http.Request) {
 	entries, err := h.manager.ImportFromDirectory(req.Path)
 	if err != nil {
 		slog.Error("import models failed", "path", req.Path, "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeRuntimeError(w, err)
 		return
 	}
 
@@ -102,7 +102,7 @@ func (h *ModelsHandler) Pull(w http.ResponseWriter, r *http.Request) {
 	id, err := h.manager.PullModel(req.Name, req.SourceURL)
 	if err != nil {
 		slog.Error("pull model failed", "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeRuntimeError(w, err)
 		return
 	}
 
@@ -124,7 +124,8 @@ func (h *ModelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // Load handles POST /api/models/{id}/load.
 //
-// Body is optional — any omitted field falls back to engine.DefaultLoadOptions.
+// Body is optional — any omitted field falls back to the runtime's configured
+// default load options.
 // See model.LoadModelRequest for the full field list with semantics.
 func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -132,7 +133,7 @@ func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	var req model.LoadModelRequest
 	readJSON(r, &req) // optional body
 
-	opts := engine.DefaultLoadOptions()
+	opts := h.manager.DefaultLoadOptions()
 
 	if req.GPULayers != nil {
 		opts.GPULayers = *req.GPULayers
@@ -177,7 +178,7 @@ func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.manager.LoadModel(id, opts); err != nil {
 		slog.Error("load model failed", "id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeRuntimeError(w, err)
 		return
 	}
 
@@ -200,10 +201,18 @@ func (h *ModelsHandler) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	snapshot := h.manager.RuntimeSnapshot()
+	active := snapshot.ActiveModelID == entry.ID
+	if !active && h.engine.LoadedModelID() == entry.ID && h.engine.IsLoaded() {
+		active = true
+	}
 	resp := model.ModelStatusResponse{
-		ID:     entry.ID,
-		Name:   entry.Name,
-		Status: entry.Status,
+		ID:           entry.ID,
+		Name:         entry.Name,
+		Status:       entry.Status,
+		RuntimeState: snapshot.State,
+		Active:       active,
+		QueueDepth:   snapshot.QueueDepth,
 	}
 
 	if entry.Status == "downloading" {
@@ -245,7 +254,7 @@ func (h *ModelsHandler) ListOllamaTags(w http.ResponseWriter, r *http.Request) {
 	}
 	tags := make([]ollamaTag, 0, len(entries))
 	for _, e := range entries {
-		if e.Status != "ready" && e.Status != "loaded" {
+		if !modelAvailableForInference(e.Status) {
 			continue
 		}
 		tags = append(tags, ollamaTag{
@@ -267,12 +276,17 @@ func (h *ModelsHandler) ListOllamaTags(w http.ResponseWriter, r *http.Request) {
 
 // ListRunning handles GET /api/ps (Ollama-compat) — shows currently-loaded models.
 func (h *ModelsHandler) ListRunning(w http.ResponseWriter, r *http.Request) {
-	id := h.engine.LoadedModelID()
+	snapshot := h.manager.RuntimeSnapshot()
+	id := snapshot.ActiveModelID
+	if id == "" {
+		id = h.engine.LoadedModelID()
+	}
 	type running struct {
 		Name      string `json:"name"`
 		Model     string `json:"model"`
 		Size      int64  `json:"size"`
 		SizeVRAM  int64  `json:"size_vram"`
+		State     string `json:"state,omitempty"`
 		ExpiresAt string `json:"expires_at,omitempty"`
 	}
 	items := []running{}
@@ -283,6 +297,7 @@ func (h *ModelsHandler) ListRunning(w http.ResponseWriter, r *http.Request) {
 				Model:    e.Name,
 				Size:     e.Size,
 				SizeVRAM: e.Size, // runtime doesn't separate; report as same
+				State:    snapshot.State,
 			})
 		}
 	}
@@ -332,10 +347,10 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 			"quantization_level": entry.Quantization,
 		},
 		"model_info": map[string]any{
-			"general.name":        entry.Name,
-			"general.size_bytes":  entry.Size,
-			"general.file_path":   entry.FilePath,
-			"general.sha256":      entry.SHA256,
+			"general.name":       entry.Name,
+			"general.size_bytes": entry.Size,
+			"general.file_path":  entry.FilePath,
+			"general.sha256":     entry.SHA256,
 		},
 	})
 }
@@ -356,5 +371,15 @@ func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
 		ErrorMessage: e.ErrorMessage,
 		FilePath:     e.FilePath,
 		DownloadedAt: e.DownloadedAt,
+	}
+}
+
+func modelAvailableForInference(status string) bool {
+	switch status {
+	case model.StatusReady, model.StatusLoaded,
+		engine.StateLoading, engine.StateGenerating, engine.StateUnloading:
+		return true
+	default:
+		return false
 	}
 }

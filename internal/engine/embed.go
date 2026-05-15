@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"time"
 )
 
 // EmbeddingResult is the output of Embed for one input string.
@@ -23,7 +22,7 @@ type EmbeddingResult struct {
 func (e *Engine) Embed(ctx context.Context, text string, normalize bool) (*EmbeddingResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	defer func() { e.lastUsedAt = time.Now() }()
+	defer e.markUsedLocked()
 
 	if e.state != StateReady {
 		return nil, fmt.Errorf("engine not ready (state: %s)", e.state)
@@ -57,13 +56,18 @@ func (e *Engine) Embed(ctx context.Context, text string, normalize bool) (*Embed
 	// For non-pooled models we need logits on every position so we can mean-pool.
 	// Prefill in chunks to respect llama.cpp n_batch on very long inputs.
 	for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		endIdx := startIdx + prefillBatchSize
 		if endIdx > len(tokens) {
 			endIdx = len(tokens)
 		}
 		batch.Clear()
 		for i := startIdx; i < endIdx; i++ {
-			batch.Add(tokens[i], i, 0, true)
+			if err := batch.Add(tokens[i], i, 0, true); err != nil {
+				return nil, err
+			}
 		}
 		if err := llamaDecode(e.ctx, batch); err != nil {
 			return nil, fmt.Errorf("decode chunk %d-%d: %w", startIdx, endIdx, err)

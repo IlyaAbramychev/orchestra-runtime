@@ -36,6 +36,33 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 
+// OllamaChatRequest is the /api/chat request shape. Ollama defaults to
+// streaming unless stream is explicitly false and puts generation parameters
+// under the nested options object.
+type OllamaChatRequest struct {
+	Model     string           `json:"model"`
+	Messages  []ChatMessage    `json:"messages"`
+	Stream    *bool            `json:"stream,omitempty"`
+	Options   *GenerateOptions `json:"options,omitempty"`
+	KeepAlive *int64           `json:"keep_alive,omitempty"`
+}
+
+type OllamaChatResponse struct {
+	Model     string      `json:"model"`
+	CreatedAt string      `json:"created_at"`
+	Message   ChatMessage `json:"message,omitempty"`
+	Done      bool        `json:"done"`
+
+	// Final-chunk fields.
+	TotalDurationNs      int64  `json:"total_duration,omitempty"`
+	PromptEvalDurationNs int64  `json:"prompt_eval_duration,omitempty"`
+	PromptEvalCount      int    `json:"prompt_eval_count,omitempty"`
+	EvalDurationNs       int64  `json:"eval_duration,omitempty"`
+	EvalCount            int    `json:"eval_count,omitempty"`
+	DoneReason           string `json:"done_reason,omitempty"`
+	Error                string `json:"error,omitempty"`
+}
+
 type ChatCompletionResponse struct {
 	ID      string   `json:"id"`
 	Object  string   `json:"object"`

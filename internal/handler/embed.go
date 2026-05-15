@@ -26,6 +26,10 @@ func (h *EmbedHandler) Embed(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if err := validateOllamaEmbedRequest(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	inputs, err := parseInputs(req.Input)
 	if err != nil {
@@ -35,10 +39,10 @@ func (h *EmbedHandler) Embed(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	// Ollama clients expect pre-normalised vectors for cosine similarity.
-	results, err := h.embedding.Embed(r.Context(), inputs, true)
+	results, err := h.embedding.EmbedForModel(r.Context(), req.Model, inputs, true)
 	if err != nil {
 		slog.Error("embed failed", "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeRuntimeError(w, err)
 		return
 	}
 	h.inference.ApplyKeepAlive(req.KeepAlive)
@@ -66,6 +70,10 @@ func (h *EmbedHandler) EmbedOpenAI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if err := validateOpenAIEmbeddingsRequest(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	inputs, err := parseInputs(req.Input)
 	if err != nil {
@@ -73,10 +81,10 @@ func (h *EmbedHandler) EmbedOpenAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := h.embedding.Embed(r.Context(), inputs, true)
+	results, err := h.embedding.EmbedForModel(r.Context(), req.Model, inputs, true)
 	if err != nil {
 		slog.Error("embed failed", "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeRuntimeError(w, err)
 		return
 	}
 
@@ -124,6 +132,26 @@ func parseInputs(raw json.RawMessage) ([]string, error) {
 		return nil, &badRequestErr{"input string is empty"}
 	}
 	return []string{s}, nil
+}
+
+func validateOllamaEmbedRequest(req *model.EmbedRequest) error {
+	if req.Truncate != nil {
+		return &badRequestErr{"truncate is not supported yet"}
+	}
+	if hasMeaningfulRawJSON(req.Options) {
+		return &badRequestErr{"options is not supported yet"}
+	}
+	return nil
+}
+
+func validateOpenAIEmbeddingsRequest(req *model.OpenAIEmbeddingsRequest) error {
+	if req.Dimensions != nil {
+		return &badRequestErr{"dimensions is not supported yet"}
+	}
+	if req.EncodingFormat != "" && req.EncodingFormat != "float" {
+		return &badRequestErr{"encoding_format must be \"float\"; base64 is not supported yet"}
+	}
+	return nil
 }
 
 type badRequestErr struct{ msg string }

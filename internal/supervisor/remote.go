@@ -32,6 +32,7 @@ type Remote struct {
 	loaded      atomic.Bool
 	state       atomic.Value // string
 	idleTimeout atomic.Int64 // ns
+	lastStatus  atomic.Int64 // unix ns
 }
 
 // NewRemote wraps a Worker supervisor. The Worker can be in any state; Remote
@@ -82,6 +83,7 @@ func (r *Remote) LoadModel(modelID, path string, opts engine.LoadOptions) error 
 		if err := r.worker.Spawn(); err != nil {
 			return fmt.Errorf("spawn worker: %w", err)
 		}
+		r.applyIdleTimeoutToWorker()
 	}
 	r.state.Store(engine.StateLoading)
 	_, err := r.worker.Call(context.Background(), rpc.MethodLoadModel, rpc.LoadParams{
@@ -120,9 +122,13 @@ func (r *Remote) UnloadModel() {
 	r.state.Store(engine.StateIdle)
 }
 
-func (r *Remote) IsLoaded() bool { return r.loaded.Load() }
+func (r *Remote) IsLoaded() bool {
+	r.refreshStatus(250 * time.Millisecond)
+	return r.loaded.Load()
+}
 
 func (r *Remote) LoadedModelID() string {
+	r.refreshStatus(250 * time.Millisecond)
 	if v, ok := r.modelID.Load().(string); ok {
 		return v
 	}
@@ -130,6 +136,7 @@ func (r *Remote) LoadedModelID() string {
 }
 
 func (r *Remote) State() string {
+	r.refreshStatus(250 * time.Millisecond)
 	if v, ok := r.state.Load().(string); ok {
 		return v
 	}
@@ -253,9 +260,7 @@ func (r *Remote) SetIdleTimeout(d time.Duration) {
 	if !r.worker.IsReady() {
 		return
 	}
-	_, _ = r.worker.Call(context.Background(), rpc.MethodSetIdleTimeout, rpc.SetIdleTimeoutParams{
-		Seconds: int64(d.Seconds()),
-	})
+	r.applyIdleTimeoutToWorker()
 }
 
 func (r *Remote) IdleTimeout() time.Duration {
@@ -280,7 +285,44 @@ func (r *Remote) ApplyKeepAlive(seconds *int64) {
 		r.modelID.Store("")
 		r.loaded.Store(false)
 		r.state.Store(engine.StateIdle)
+	} else {
+		r.idleTimeout.Store(0)
 	}
+}
+
+func (r *Remote) applyIdleTimeoutToWorker() {
+	d := time.Duration(r.idleTimeout.Load())
+	_, _ = r.worker.Call(context.Background(), rpc.MethodSetIdleTimeout, rpc.SetIdleTimeoutParams{
+		Seconds: int64(d.Seconds()),
+	})
+}
+
+func (r *Remote) refreshStatus(timeout time.Duration) {
+	if !r.worker.IsReady() {
+		return
+	}
+	now := time.Now()
+	last := r.lastStatus.Load()
+	if last > 0 && now.Sub(time.Unix(0, last)) < time.Second {
+		return
+	}
+	if !r.lastStatus.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	raw, err := r.worker.Call(ctx, rpc.MethodStatus, nil)
+	if err != nil {
+		return
+	}
+	var status rpc.StatusResult
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return
+	}
+	r.loaded.Store(status.IsLoaded)
+	r.modelID.Store(status.ModelID)
+	r.state.Store(status.State)
+	r.idleTimeout.Store(status.IdleTimeoutNs)
 }
 
 // MarkUsed is a no-op on the remote side: the worker already updates its own

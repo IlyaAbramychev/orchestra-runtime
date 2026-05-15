@@ -19,6 +19,11 @@ import (
 // a hand-built binary is running vs a release artefact.
 var Version = "dev"
 
+// BuildCommit and LlamaCppCommit identify the exact runtime and llama.cpp
+// sources used for this binary. Release builds inject both via ldflags.
+var BuildCommit = "unknown"
+var LlamaCppCommit = "unknown"
+
 // Cached hardware sample — avoid spawning `vm_stat` / `nvidia-smi` on every
 // /api/system call (they're fork-heavy and get spammy under load).
 type hwSample struct {
@@ -29,7 +34,8 @@ type hwSample struct {
 }
 
 type SystemInfo struct {
-	engine engine.Backend
+	engine    engine.Backend
+	scheduler *RuntimeScheduler
 
 	hwMu     sync.Mutex
 	hwCache  hwSample
@@ -41,6 +47,10 @@ func NewSystemInfo(eng engine.Backend) *SystemInfo {
 		engine:   eng,
 		hwMaxAge: 5 * time.Second,
 	}
+}
+
+func (s *SystemInfo) SetScheduler(scheduler *RuntimeScheduler) {
+	s.scheduler = scheduler
 }
 
 // hardware returns a lightly-cached hardware snapshot.
@@ -61,13 +71,25 @@ func (s *SystemInfo) hardware() (int64, int64, *model.GPUInfo) {
 
 func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 	totalRAM, availableRAM, gpu := s.hardware()
+	engineState := s.engine.State()
+	currentModelID := s.engine.LoadedModelID()
+	if s.scheduler != nil {
+		snapshot := s.scheduler.Snapshot()
+		engineState = snapshot.State
+		if snapshot.ActiveModelID != "" {
+			currentModelID = snapshot.ActiveModelID
+		}
+	}
 	info := &model.SystemInfoResponse{
 		Service:            "orchestra-runtime",
 		Version:            Version,
+		BuildCommit:        BuildCommit,
+		LlamaCppCommit:     LlamaCppCommit,
+		Platform:           runtime.GOOS,
 		OS:                 runtime.GOOS,
 		Arch:               runtime.GOARCH,
 		CPUCount:           runtime.NumCPU(),
-		EngineState:        s.engine.State(),
+		EngineState:        engineState,
 		QueueDepth:         queueDepth,
 		IdleTimeoutSeconds: int(s.engine.IdleTimeout().Seconds()),
 		TotalRAM:           totalRAM,
@@ -75,8 +97,8 @@ func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 		GPU:                gpu,
 	}
 
-	if id := s.engine.LoadedModelID(); id != "" {
-		info.CurrentModel = &id
+	if currentModelID != "" {
+		info.CurrentModel = &currentModelID
 	}
 
 	return info

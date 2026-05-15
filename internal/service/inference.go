@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/model"
@@ -14,32 +13,77 @@ import (
 // (*supervisor.Remote) — chosen in server.Start based on
 // ORCHESTRA_USE_SUBPROCESS.
 type InferenceService struct {
-	engine   engine.Backend
-	sem      chan struct{}
-	mu       sync.Mutex
-	queueLen int
+	scheduler *RuntimeScheduler
+	engine    engine.Backend
+	loader    ModelLoader
+}
+
+// ModelLoader resolves and loads a model for request-scoped auto-load.
+type ModelLoader interface {
+	EnsureLoaded(ctx context.Context, model string) error
 }
 
 func NewInferenceService(eng engine.Backend, maxQueue int) *InferenceService {
-	if maxQueue <= 0 {
-		maxQueue = 1
-	}
+	return NewInferenceServiceWithScheduler(NewRuntimeScheduler(eng, maxQueue))
+}
+
+func NewInferenceServiceWithScheduler(scheduler *RuntimeScheduler) *InferenceService {
 	return &InferenceService{
-		engine: eng,
-		sem:    make(chan struct{}, 1), // 1 concurrent inference
+		scheduler: scheduler,
+		engine:    scheduler.Backend(),
 	}
+}
+
+func (s *InferenceService) SetModelLoader(loader ModelLoader) {
+	s.loader = loader
+}
+
+func (s *InferenceService) ensureLoaded(ctx context.Context, model string) error {
+	if s.loader != nil && model != "" {
+		return s.loader.EnsureLoaded(ctx, model)
+	}
+	if !s.engine.IsLoaded() {
+		return fmt.Errorf("no model loaded")
+	}
+	return nil
 }
 
 // QueueDepth returns the number of waiting requests.
 func (s *InferenceService) QueueDepth() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.queueLen
+	return s.scheduler.QueueDepth()
 }
 
 // ApplyKeepAlive forwards a per-request keep_alive hint to the engine.
 func (s *InferenceService) ApplyKeepAlive(seconds *int64) {
-	s.engine.ApplyKeepAlive(seconds)
+	s.scheduler.ApplyKeepAlive(seconds)
+}
+
+func forwardCompletionChunks(
+	ctx context.Context,
+	ch <-chan engine.CompletionChunk,
+	release func(),
+) <-chan engine.CompletionChunk {
+	out := make(chan engine.CompletionChunk, 32)
+	go func() {
+		defer close(out)
+		defer release()
+		for {
+			select {
+			case chunk, ok := <-ch:
+				if !ok {
+					return
+				}
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
 }
 
 // Generate runs /api/generate-style completion: raw prompt in, raw text out.
@@ -48,27 +92,18 @@ func (s *InferenceService) ApplyKeepAlive(seconds *int64) {
 // verbatim (RawPrompt=true).
 func (s *InferenceService) Generate(
 	ctx context.Context,
+	model string,
 	prompt, system string,
 	params engine.CompletionParams,
 ) (*engine.CompletionResult, error) {
-	if !s.engine.IsLoaded() {
-		return nil, fmt.Errorf("no model loaded")
+	if err := s.ensureLoaded(ctx, model); err != nil {
+		return nil, err
 	}
-	s.mu.Lock()
-	s.queueLen++
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.queueLen--
-		s.mu.Unlock()
-	}()
-
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	msgs := buildGenerateMessages(prompt, system, &params)
 	return s.engine.Complete(ctx, msgs, params)
@@ -77,49 +112,26 @@ func (s *InferenceService) Generate(
 // GenerateStream is the streaming twin of Generate.
 func (s *InferenceService) GenerateStream(
 	ctx context.Context,
+	model string,
 	prompt, system string,
 	params engine.CompletionParams,
 ) (<-chan engine.CompletionChunk, error) {
-	if !s.engine.IsLoaded() {
-		return nil, fmt.Errorf("no model loaded")
+	if err := s.ensureLoaded(ctx, model); err != nil {
+		return nil, err
 	}
-	s.mu.Lock()
-	s.queueLen++
-	s.mu.Unlock()
-
-	select {
-	case s.sem <- struct{}{}:
-	case <-ctx.Done():
-		s.mu.Lock()
-		s.queueLen--
-		s.mu.Unlock()
-		return nil, ctx.Err()
+	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	if err != nil {
+		return nil, err
 	}
 
 	msgs := buildGenerateMessages(prompt, system, &params)
 	ch, err := s.engine.CompleteStream(ctx, msgs, params)
 	if err != nil {
-		<-s.sem
-		s.mu.Lock()
-		s.queueLen--
-		s.mu.Unlock()
+		release()
 		return nil, err
 	}
 
-	out := make(chan engine.CompletionChunk, 32)
-	go func() {
-		defer close(out)
-		defer func() { <-s.sem }()
-		defer func() {
-			s.mu.Lock()
-			s.queueLen--
-			s.mu.Unlock()
-		}()
-		for chunk := range ch {
-			out <- chunk
-		}
-	}()
-	return out, nil
+	return forwardCompletionChunks(ctx, ch, release), nil
 }
 
 // buildGenerateMessages chooses between raw-prompt and chat-template modes.
@@ -139,26 +151,15 @@ func buildGenerateMessages(prompt, system string, params *engine.CompletionParam
 
 // Complete runs a non-streaming chat completion.
 func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompletionRequest) (*engine.CompletionResult, error) {
-	if !s.engine.IsLoaded() {
-		return nil, fmt.Errorf("no model loaded")
+	if err := s.ensureLoaded(ctx, req.Model); err != nil {
+		return nil, err
 	}
 
-	s.mu.Lock()
-	s.queueLen++
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.queueLen--
-		s.mu.Unlock()
-	}()
-
-	// Wait for semaphore
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	msgs := toEngineMessages(req.Messages)
 	params := toEngineParams(req)
@@ -168,22 +169,13 @@ func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompleti
 
 // CompleteStream runs a streaming chat completion.
 func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCompletionRequest) (<-chan engine.CompletionChunk, error) {
-	if !s.engine.IsLoaded() {
-		return nil, fmt.Errorf("no model loaded")
+	if err := s.ensureLoaded(ctx, req.Model); err != nil {
+		return nil, err
 	}
 
-	s.mu.Lock()
-	s.queueLen++
-	s.mu.Unlock()
-
-	// Wait for semaphore
-	select {
-	case s.sem <- struct{}{}:
-	case <-ctx.Done():
-		s.mu.Lock()
-		s.queueLen--
-		s.mu.Unlock()
-		return nil, ctx.Err()
+	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	if err != nil {
+		return nil, err
 	}
 
 	msgs := toEngineMessages(req.Messages)
@@ -191,29 +183,11 @@ func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCo
 
 	ch, err := s.engine.CompleteStream(ctx, msgs, params)
 	if err != nil {
-		<-s.sem
-		s.mu.Lock()
-		s.queueLen--
-		s.mu.Unlock()
+		release()
 		return nil, err
 	}
 
-	// Wrap channel to release semaphore on completion
-	out := make(chan engine.CompletionChunk, 32)
-	go func() {
-		defer close(out)
-		defer func() { <-s.sem }()
-		defer func() {
-			s.mu.Lock()
-			s.queueLen--
-			s.mu.Unlock()
-		}()
-		for chunk := range ch {
-			out <- chunk
-		}
-	}()
-
-	return out, nil
+	return forwardCompletionChunks(ctx, ch, release), nil
 }
 
 func toEngineMessages(msgs []model.ChatMessage) []engine.ChatMessage {

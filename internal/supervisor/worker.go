@@ -58,15 +58,19 @@ func defaultOptions() Options {
 type Worker struct {
 	opts Options
 
-	mu       sync.RWMutex
-	cmd      *exec.Cmd
-	conn     net.Conn
-	codec    *rpc.Codec
-	ready    atomic.Bool
-	pending  map[string]*pendingCall
-	socket   string
-	stderr   strings.Builder
-	crashErr error
+	mu           sync.RWMutex
+	cmd          *exec.Cmd
+	conn         net.Conn
+	codec        *rpc.Codec
+	ready        atomic.Bool
+	shuttingDown atomic.Bool
+	starting     bool
+	startDone    chan struct{}
+	startErr     error
+	pending      map[string]*pendingCall
+	socket       string
+	stderr       strings.Builder
+	crashErr     error
 	// Crash history for the respawn quota.
 	crashes []time.Time
 	// Listeners get notified when the worker exits (either cleanly or on crash).
@@ -112,12 +116,35 @@ func (w *Worker) OnExit(fn func(err error)) {
 
 // Spawn starts the worker subprocess and dials its Unix socket. Returns once
 // a ping RPC has succeeded (so callers can safely issue requests after).
-func (w *Worker) Spawn() error {
+func (w *Worker) Spawn() (err error) {
 	w.mu.Lock()
 	if w.ready.Load() {
 		w.mu.Unlock()
 		return nil
 	}
+	if w.starting {
+		done := w.startDone
+		w.mu.Unlock()
+		<-done
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		if w.ready.Load() {
+			return nil
+		}
+		if w.startErr != nil {
+			return w.startErr
+		}
+		return errors.New("worker not ready after spawn")
+	}
+	w.starting = true
+	w.startDone = make(chan struct{})
+	defer func() {
+		w.mu.Lock()
+		w.starting = false
+		w.startErr = err
+		close(w.startDone)
+		w.mu.Unlock()
+	}()
 	bin := w.opts.WorkerBinary
 	if bin == "" {
 		selfDir, _ := os.Executable()
@@ -171,6 +198,7 @@ func (w *Worker) Spawn() error {
 	w.mu.Lock()
 	w.conn = conn
 	w.codec = rpc.NewCodec(conn)
+	w.crashErr = nil
 	w.ready.Store(true)
 	w.mu.Unlock()
 
@@ -226,6 +254,7 @@ func (w *Worker) drainStderr(r io.Reader) {
 func (w *Worker) waitAndReport() {
 	err := w.cmd.Wait()
 	w.ready.Store(false)
+	w.shuttingDown.Store(false)
 	slog.Warn("worker exited", "error", err, "pid", w.cmd.ProcessState.Pid())
 
 	// Classify: clean vs crash. We treat anything other than exit 0 / SIGTERM
@@ -307,6 +336,7 @@ func (w *Worker) readLoop() {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				slog.Warn("worker read loop error", "error", err)
 			}
+			w.handleDisconnect(err)
 			return
 		}
 		w.mu.Lock()
@@ -333,6 +363,38 @@ func (w *Worker) readLoop() {
 			}
 		default:
 			slog.Warn("unexpected kind", "kind", env.Kind, "id", env.ID)
+		}
+	}
+}
+
+func (w *Worker) handleDisconnect(err error) {
+	w.ready.Store(false)
+
+	w.mu.Lock()
+	conn := w.conn
+	shuttingDown := w.shuttingDown.Load()
+	proc := (*os.Process)(nil)
+	if w.cmd != nil {
+		proc = w.cmd.Process
+	}
+	if !shuttingDown && w.crashErr == nil {
+		w.crashErr = fmt.Errorf("worker disconnected: %w", err)
+	}
+	pend := w.pending
+	w.pending = make(map[string]*pendingCall)
+	w.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if proc != nil && !shuttingDown {
+		_ = proc.Kill()
+	}
+
+	for _, pc := range pend {
+		close(pc.final)
+		if pc.chunks != nil {
+			close(pc.chunks)
 		}
 	}
 }
@@ -428,26 +490,48 @@ func (w *Worker) CallStream(ctx context.Context, method string, params any) (<-c
 	out := make(chan *rpc.Envelope, 32)
 	go func() {
 		defer close(out)
+		cancelSent := false
+		done := ctx.Done()
+		sendCancel := func() {
+			if cancelSent {
+				return
+			}
+			_ = w.codec.Write(&rpc.Envelope{
+				ID:     uuid.New().String(),
+				Kind:   rpc.KindRequest,
+				Method: rpc.MethodCancel,
+				Params: mustJSON(rpc.CancelParams{Target: id}),
+			})
+			cancelSent = true
+			done = nil
+		}
 		for {
 			select {
 			case ch, ok := <-pc.chunks:
 				if !ok {
 					return
 				}
-				out <- ch
+				if cancelSent {
+					continue
+				}
+				select {
+				case out <- ch:
+				case <-done:
+					sendCancel()
+				}
 			case env, ok := <-pc.final:
 				if !ok {
 					return
 				}
-				out <- env
+				if !cancelSent {
+					select {
+					case out <- env:
+					case <-ctx.Done():
+					}
+				}
 				return
-			case <-ctx.Done():
-				_ = w.codec.Write(&rpc.Envelope{
-					ID:     uuid.New().String(),
-					Kind:   rpc.KindRequest,
-					Method: rpc.MethodCancel,
-					Params: mustJSON(rpc.CancelParams{Target: id}),
-				})
+			case <-done:
+				sendCancel()
 				// Keep draining until the worker sends its final so we clean
 				// up the pending map. If worker dies, channels close.
 			}
@@ -461,6 +545,7 @@ func (w *Worker) Shutdown(ctx context.Context) error {
 	if !w.ready.Load() {
 		return nil
 	}
+	w.shuttingDown.Store(true)
 	shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	_, _ = w.Call(shutdownCtx, rpc.MethodShutdown, nil)
