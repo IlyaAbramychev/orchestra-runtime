@@ -1,17 +1,19 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "releasedAt": "2026-05-04T16:33:59.642Z",
-  "runtimeVersion": "0.3.2",
+  "releasedAt": "2026-05-15T09:40:03.000Z",
+  "runtimeVersion": "0.3.3",
   "minExtensionVersion": "0.2.0",
   "maxExtensionVersion": "0.x",
   "critical": false,
-  "notes": "Test update release: darwin-arm64 GitHub Release asset v0.3.2.",
+  "notes": "Runtime 0.3.3: lifecycle, model download reliability, metadata/templates, and context_length_exceeded error mapping.",
   "artifacts": [
     {
       "platform": "darwin",
       "arch": "arm64",
-      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.2/orchestra-runtime-darwin-arm64"
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.3.3/orchestra-runtime-darwin-arm64",
+      "sha256": "83fe8344e26274957b9be60f028298c190870e00983e44cf1cbe1e956db185d4",
+      "size": 11083522
     }
   ]
 }
