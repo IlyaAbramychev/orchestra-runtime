@@ -38,6 +38,13 @@ func TestCapabilityMismatchMapsToBadRequest(t *testing.T) {
 	}
 }
 
+func TestCustomTemplateErrorMapsToBadRequest(t *testing.T) {
+	status := runtimeHTTPStatus(errors.New("custom chat template failed: failed to apply chat template"))
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", status)
+	}
+}
+
 func TestOpenAIEmbeddingsRejectUnsupportedFields(t *testing.T) {
 	scheduler := service.NewRuntimeScheduler(&fakeChatBackend{}, 1)
 	inference := service.NewInferenceServiceWithScheduler(scheduler)

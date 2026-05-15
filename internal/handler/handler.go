@@ -53,7 +53,8 @@ func runtimeHTTPStatus(err error) int {
 		strings.Contains(msg, "input too long"),
 		strings.Contains(msg, "context window"),
 		strings.Contains(msg, "context_overflow"),
-		strings.Contains(msg, "does not support"):
+		strings.Contains(msg, "does not support"),
+		strings.Contains(msg, "custom chat template failed"):
 		return http.StatusBadRequest
 	case strings.Contains(msg, "engine not ready"),
 		strings.Contains(msg, "worker not ready"):
