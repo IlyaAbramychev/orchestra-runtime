@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -106,5 +107,80 @@ func TestPullModelFailsOnSHA256Mismatch(t *testing.T) {
 	}
 	if _, err := os.Stat(entry.FilePath); !os.IsNotExist(err) {
 		t.Fatalf("expected final file removed, stat err=%v", err)
+	}
+}
+
+func TestPullModelResumesPartialDownload(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+	body := []byte("hello world")
+	sum := sha256.Sum256(body)
+	rangeSeen := make(chan string, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/model.gguf" {
+			http.NotFound(w, r)
+			return
+		}
+		rangeHeader := r.Header.Get("Range")
+		if rangeHeader != "" {
+			rangeSeen <- rangeHeader
+			if rangeHeader != "bytes=5-" {
+				http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 5-%d/%d", len(body)-1, len(body)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(body[5:])
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	partPath := tmp + "/model.gguf.part"
+	if err := os.WriteFile(partPath, body[:5], 0644); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+
+	id, err := manager.PullModelWithMetadata("resume", server.URL+"/model.gguf", PullModelMetadata{
+		SHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if ds := manager.GetDownloadState(id); ds != nil {
+		<-ds.Done
+		if ds.Error != nil {
+			t.Fatalf("download error: %v", ds.Error)
+		}
+	}
+
+	select {
+	case got := <-rangeSeen:
+		if got != "bytes=5-" {
+			t.Fatalf("range = %q", got)
+		}
+	default:
+		t.Fatal("expected range request")
+	}
+
+	entry := registry.Get(id)
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	data, err := os.ReadFile(entry.FilePath)
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	if string(data) != string(body) {
+		t.Fatalf("final file = %q", data)
+	}
+	if entry.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("sha256 = %q", entry.SHA256)
 	}
 }

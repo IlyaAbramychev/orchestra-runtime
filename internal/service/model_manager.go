@@ -319,17 +319,18 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 	slog.Info("starting model download", "id", entry.ID, "url", entry.SourceURL, "path", entry.FilePath)
 
 	partPath := entry.FilePath + ".part"
-	out, err := os.Create(partPath)
-	if err != nil {
-		m.failDownload(entry, ds, fmt.Errorf("create file: %w", err))
-		return
+	var resumeFrom int64
+	if st, err := os.Stat(partPath); err == nil && st.Size() > 0 {
+		resumeFrom = st.Size()
 	}
-	defer out.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", entry.SourceURL, nil)
 	if err != nil {
 		m.failDownload(entry, ds, fmt.Errorf("create request: %w", err))
 		return
+	}
+	if resumeFrom > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -337,21 +338,85 @@ func (m *ModelManager) downloadModel(ctx context.Context, entry *storage.ModelEn
 		m.failDownload(entry, ds, fmt.Errorf("download: %w", err))
 		return
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resumeFrom > 0 {
+		switch resp.StatusCode {
+		case http.StatusPartialContent:
+			// Server accepted the range; keep the existing .part bytes.
+		case http.StatusOK:
+			// Server ignored Range; restart from scratch.
+			resumeFrom = 0
+		case http.StatusRequestedRangeNotSatisfiable:
+			// Stale/corrupt .part size. Restart cleanly.
+			resp.Body.Close()
+			_ = os.Remove(partPath)
+			resumeFrom = 0
+			req, err = http.NewRequestWithContext(ctx, "GET", entry.SourceURL, nil)
+			if err != nil {
+				m.failDownload(entry, ds, fmt.Errorf("create request: %w", err))
+				return
+			}
+			resp, err = http.DefaultClient.Do(req)
+			if err != nil {
+				m.failDownload(entry, ds, fmt.Errorf("download: %w", err))
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				m.failDownload(entry, ds, fmt.Errorf("HTTP %d", resp.StatusCode))
+				resp.Body.Close()
+				return
+			}
+		default:
+			m.failDownload(entry, ds, fmt.Errorf("HTTP %d", resp.StatusCode))
+			resp.Body.Close()
+			return
+		}
+	} else if resp.StatusCode != http.StatusOK {
 		m.failDownload(entry, ds, fmt.Errorf("HTTP %d", resp.StatusCode))
+		resp.Body.Close()
 		return
 	}
+	defer resp.Body.Close()
 
-	ds.TotalBytes = resp.ContentLength
 	hasher := sha256.New()
+	if resumeFrom > 0 {
+		existing, err := os.Open(partPath)
+		if err != nil {
+			m.failDownload(entry, ds, fmt.Errorf("open partial file: %w", err))
+			return
+		}
+		if _, err := io.Copy(hasher, existing); err != nil {
+			existing.Close()
+			m.failDownload(entry, ds, fmt.Errorf("hash partial file: %w", err))
+			return
+		}
+		existing.Close()
+	}
+
+	out, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		m.failDownload(entry, ds, fmt.Errorf("open partial file: %w", err))
+		return
+	}
+	if resumeFrom == 0 {
+		if err := out.Truncate(0); err != nil {
+			out.Close()
+			m.failDownload(entry, ds, fmt.Errorf("truncate partial file: %w", err))
+			return
+		}
+	}
+	defer out.Close()
+
+	if resp.ContentLength > 0 {
+		ds.TotalBytes = resp.ContentLength + resumeFrom
+	}
 	reader := io.TeeReader(resp.Body, hasher)
 
 	buf := make([]byte, 256*1024) // 256KB buffer
-	var downloaded int64
+	downloaded := resumeFrom
+	ds.DownloadedBytes.Store(downloaded)
 	lastSpeedUpdate := time.Now()
-	var lastBytes int64
+	lastBytes := downloaded
 
 	for {
 		n, readErr := reader.Read(buf)
