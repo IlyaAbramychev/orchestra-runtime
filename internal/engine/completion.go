@@ -154,10 +154,7 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	// Guard: llama.cpp SIGSEGVs on batch decode when position >= n_ctx,
 	// which takes down the whole process. Refuse overflowing requests here.
 	if nPrompt >= nCtx {
-		return nil, fmt.Errorf(
-			"prompt too long: %d tokens ≥ context window %d — reduce attachments/text or load the model with a bigger n_ctx",
-			nPrompt, nCtx,
-		)
+		return nil, NewContextLengthExceededError(nPrompt, nCtx, false)
 	}
 
 	maxTokens := params.MaxTokens
@@ -302,10 +299,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 	// before handing tokens to the C side.
 	if nPrompt >= nCtx {
 		e.mu.Unlock()
-		return nil, fmt.Errorf(
-			"prompt too long: %d tokens ≥ context window %d — reduce attachments/text or reload the model with a bigger n_ctx",
-			nPrompt, nCtx,
-		)
+		return nil, NewContextLengthExceededError(nPrompt, nCtx, true)
 	}
 
 	ch := make(chan CompletionChunk, 32)

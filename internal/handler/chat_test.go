@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,6 +162,7 @@ func TestRuntimeErrorStatusMapping(t *testing.T) {
 	}{
 		{name: "queue", err: fmt.Errorf("runtime queue full"), want: http.StatusTooManyRequests},
 		{name: "overflow", err: fmt.Errorf("prompt too long: 999 tokens >= context window 10"), want: http.StatusBadRequest},
+		{name: "typed overflow", err: engine.NewContextLengthExceededError(32801, 12032, true), want: http.StatusBadRequest},
 		{name: "timeout", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
 		{name: "cancelled", err: context.Canceled, want: 499},
 	}
@@ -177,6 +179,31 @@ func TestRuntimeErrorStatusMapping(t *testing.T) {
 				t.Fatalf("expected status %d, got %d: %s", tc.want, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestOpenAIChatStreamContextLengthErrorReturnsBadRequest(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+		streamErr: engine.NewContextLengthExceededError(32801, 12032, true),
+	}, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] != engine.ContextLengthExceededCode || resp["type"] != engine.ContextLengthExceededCode {
+		t.Fatalf("unexpected error payload: %+v", resp)
+	}
+	if !strings.Contains(resp["error"], "32801 tokens") || !strings.Contains(resp["error"], "12032") {
+		t.Fatalf("unexpected error message: %+v", resp)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/rpc"
 )
 
@@ -22,7 +23,12 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func writeRuntimeError(w http.ResponseWriter, err error) {
-	writeError(w, runtimeHTTPStatus(err), err.Error())
+	payload := map[string]string{"error": err.Error()}
+	if code := runtimeErrorCode(err); code != "" {
+		payload["code"] = code
+		payload["type"] = code
+	}
+	writeJSON(w, runtimeHTTPStatus(err), payload)
 }
 
 func runtimeHTTPStatus(err error) int {
@@ -31,6 +37,10 @@ func runtimeHTTPStatus(err error) int {
 	}
 	var badReq *badRequestErr
 	if errors.As(err, &badReq) {
+		return http.StatusBadRequest
+	}
+	var contextLength *engine.ContextLengthExceededError
+	if errors.As(err, &contextLength) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, context.Canceled) {
@@ -61,6 +71,26 @@ func runtimeHTTPStatus(err error) int {
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+func runtimeErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var contextLength *engine.ContextLengthExceededError
+	if errors.As(err, &contextLength) {
+		return contextLength.Code()
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "prompt too long"),
+		strings.Contains(msg, "input too long"),
+		strings.Contains(msg, "context window"),
+		strings.Contains(msg, "context_overflow"):
+		return engine.ContextLengthExceededCode
+	default:
+		return ""
 	}
 }
 
