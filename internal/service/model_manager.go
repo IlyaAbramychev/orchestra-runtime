@@ -205,7 +205,8 @@ func (m *ModelManager) DefaultsForModel(ref string) (ModelRequestDefaults, error
 	}
 	normalized := cloneModelEntry(entry)
 	return ModelRequestDefaults{
-		StopTokens: append([]string(nil), normalized.StopTokens...),
+		StopTokens:   append([]string(nil), normalized.StopTokens...),
+		ChatTemplate: normalized.Template,
 	}, nil
 }
 

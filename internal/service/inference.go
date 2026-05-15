@@ -19,7 +19,8 @@ type InferenceService struct {
 }
 
 type ModelRequestDefaults struct {
-	StopTokens []string
+	StopTokens   []string
+	ChatTemplate string
 }
 
 // ModelLoader resolves and loads a model for request-scoped auto-load.
@@ -55,15 +56,18 @@ func (s *InferenceService) ensureLoaded(ctx context.Context, model string) error
 }
 
 func (s *InferenceService) applyModelDefaults(model string, params *engine.CompletionParams) {
-	if s.loader == nil || model == "" || len(params.Stop) > 0 {
+	if s.loader == nil || model == "" {
 		return
 	}
 	defaults, err := s.loader.DefaultsForModel(model)
 	if err != nil {
 		return
 	}
-	if len(defaults.StopTokens) > 0 {
+	if len(params.Stop) == 0 && len(defaults.StopTokens) > 0 {
 		params.Stop = append([]string(nil), defaults.StopTokens...)
+	}
+	if params.ChatTemplate == "" && defaults.ChatTemplate != "" {
+		params.ChatTemplate = defaults.ChatTemplate
 	}
 }
 

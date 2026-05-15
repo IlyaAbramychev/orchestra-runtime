@@ -331,3 +331,45 @@ func TestInferenceRequestStopOverridesModelDefaults(t *testing.T) {
 		t.Fatalf("expected request stop tokens %v, got %v", want, backend.lastParams.Stop)
 	}
 }
+
+func TestInferenceAppliesModelChatTemplateByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "chat.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:       "chat-1",
+		Name:     "chat-model",
+		Filename: "chat.gguf",
+		Status:   "ready",
+		FilePath: modelPath,
+		Template: "{{ .Prompt }}",
+		Capabilities: storage.ModelCapabilities{
+			Chat: true,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "chat-model",
+		Messages: []model.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if backend.lastParams.ChatTemplate != "{{ .Prompt }}" {
+		t.Fatalf("expected model chat template, got %q", backend.lastParams.ChatTemplate)
+	}
+}

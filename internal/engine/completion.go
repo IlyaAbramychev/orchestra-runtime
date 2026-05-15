@@ -58,6 +58,9 @@ type CompletionParams struct {
 	MirostatTau float32
 	MirostatEta float32
 	Stop        []string
+	// ChatTemplate overrides the model's built-in llama.cpp chat template.
+	// Empty string means use the GGUF embedded template.
+	ChatTemplate string
 	/** Raw prompt mode skips the chat template and sends bytes as-is. Used
 	 *  for POST /api/generate to allow raw completion-style prompts. */
 	RawPrompt bool
@@ -134,7 +137,7 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	if params.RawPrompt && len(messages) == 1 {
 		prompt = messages[0].Content
 	} else {
-		prompt, err = e.buildPrompt(messages)
+		prompt, err = e.buildPrompt(messages, params.ChatTemplate)
 		if err != nil {
 			return nil, fmt.Errorf("build prompt: %w", err)
 		}
@@ -278,7 +281,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 	if params.RawPrompt && len(messages) == 1 {
 		prompt = messages[0].Content
 	} else {
-		prompt, err = e.buildPrompt(messages)
+		prompt, err = e.buildPrompt(messages, params.ChatTemplate)
 		if err != nil {
 			e.mu.Unlock()
 			return nil, fmt.Errorf("build prompt: %w", err)
@@ -474,15 +477,15 @@ func (e *Engine) promptBatchSize() int {
 }
 
 // buildPrompt applies the chat template to convert messages into a prompt string.
-func (e *Engine) buildPrompt(messages []ChatMessage) (string, error) {
+func (e *Engine) buildPrompt(messages []ChatMessage, template string) (string, error) {
 	if len(messages) == 0 {
 		return "", fmt.Errorf("no messages")
 	}
 
-	// Try model's built-in template first (tmpl = "")
-	result, err := ApplyChatTemplate("", messages, true)
+	// Empty template tells llama.cpp to use the model's embedded template.
+	result, err := ApplyChatTemplate(template, messages, true)
 	if err != nil {
-		slog.Warn("built-in chat template failed, falling back to ChatML", "error", err)
+		slog.Warn("chat template failed, falling back to ChatML", "error", err)
 		return buildChatMLPrompt(messages), nil
 	}
 	return result, nil
