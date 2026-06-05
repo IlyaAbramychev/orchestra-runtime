@@ -47,6 +47,7 @@ type PullModelMetadata struct {
 	Family              string
 	Parameters          string
 	SHA256              string
+	MMProjFilename      string
 	Template            string
 	StopTokens          []string
 	Capabilities        *storage.ModelCapabilities
@@ -219,6 +220,7 @@ func (m *ModelManager) CopyModel(source, destination string) (string, error) {
 	entry.Name = destination
 	entry.StopTokens = append([]string(nil), sourceEntry.StopTokens...)
 	entry.License = append([]string(nil), sourceEntry.License...)
+	entry.MMProjFilename = sourceEntry.MMProjFilename
 	entry.DownloadedAt = time.Now().UTC()
 	if entry.Status == "loaded" {
 		entry.Status = "ready"
@@ -256,6 +258,7 @@ func (m *ModelManager) CreateModelFromBase(name, from string, metadata CreateMod
 	entry.SourceURL = "ollama://" + name
 	entry.StopTokens = append([]string(nil), base.StopTokens...)
 	entry.License = append([]string(nil), base.License...)
+	entry.MMProjFilename = base.MMProjFilename
 	entry.DownloadedAt = time.Now().UTC()
 	if entry.Status == "loaded" {
 		entry.Status = "ready"
@@ -413,6 +416,7 @@ func (m *ModelManager) PullModelWithMetadata(name, sourceURL string, metadata Pu
 		StopTokens:          append([]string(nil), metadata.StopTokens...),
 		Capabilities:        capabilities,
 		RecommendedSettings: settings,
+		MMProjFilename:      strings.TrimSpace(metadata.MMProjFilename),
 		Status:              "downloading",
 		FilePath:            filePath,
 		DownloadedAt:        time.Now().UTC(),
@@ -766,7 +770,7 @@ func (m *ModelManager) ImportFromDirectory(dir string) ([]*storage.ModelEntry, e
 			return nil
 		}
 		// Skip multimodal projection files — they are not standalone models
-		if strings.HasPrefix(strings.ToLower(info.Name()), "mmproj") {
+		if isMMProjFilename(info.Name()) {
 			return nil
 		}
 		if existing[path] {
@@ -790,6 +794,7 @@ func (m *ModelManager) ImportFromDirectory(dir string) ([]*storage.ModelEntry, e
 			Parameters:          meta.parameters,
 			Capabilities:        inferModelCapabilities(name, filename),
 			RecommendedSettings: inferRecommendedSettings(meta),
+			MMProjFilename:      discoverMMProjFilename(path),
 			SourceURL:           "file://" + path,
 			Status:              "ready",
 			FilePath:            path,
@@ -851,6 +856,7 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 	if entry.Status != "ready" && entry.Status != "loaded" {
 		return fmt.Errorf("model %s is not ready (status: %s)", id, entry.Status)
 	}
+	opts = m.resolveModelLoadOptions(entry, opts)
 
 	// Stat the file for its on-disk size; gguf mmap occupies roughly that
 	// many bytes of RAM at inference time.
@@ -937,6 +943,95 @@ func (m *ModelManager) unloadCurrentModel(ctx context.Context) error {
 	return nil
 }
 
+func (m *ModelManager) resolveModelLoadOptions(entry *storage.ModelEntry, opts engine.LoadOptions) engine.LoadOptions {
+	if strings.TrimSpace(opts.MMProjPath) != "" || entry == nil {
+		return opts
+	}
+	if resolved, ok := resolveEntryMMProjPath(entry); ok {
+		opts.MMProjPath = resolved
+	}
+	return opts
+}
+
+func resolveEntryMMProjPath(entry *storage.ModelEntry) (string, bool) {
+	if entry == nil || strings.TrimSpace(entry.FilePath) == "" {
+		return "", false
+	}
+	modelDir := filepath.Dir(entry.FilePath)
+	configured := strings.TrimSpace(entry.MMProjFilename)
+	if configured != "" {
+		resolved := configured
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(modelDir, configured)
+		}
+		if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+			return resolved, true
+		}
+		slog.Warn("configured mmproj file not found", "model", entry.Name, "mmproj", resolved)
+		return "", false
+	}
+	filename := discoverMMProjFilename(entry.FilePath)
+	if filename == "" {
+		return "", false
+	}
+	return filepath.Join(modelDir, filename), true
+}
+
+func discoverMMProjFilename(modelPath string) string {
+	modelPath = strings.TrimSpace(modelPath)
+	if modelPath == "" {
+		return ""
+	}
+	dir := filepath.Dir(modelPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	modelBase := strings.ToLower(filepath.Base(modelPath))
+	modelStem := strings.TrimSuffix(modelBase, filepath.Ext(modelBase))
+
+	type candidate struct {
+		name  string
+		score int
+	}
+	var candidates []candidate
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		lower := strings.ToLower(name)
+		if lower == modelBase || !strings.HasSuffix(lower, ".gguf") || !isMMProjFilename(name) {
+			continue
+		}
+		score := 1
+		stem := strings.TrimSuffix(lower, filepath.Ext(lower))
+		if strings.Contains(stem, modelStem) || strings.Contains(modelStem, stem) {
+			score = 3
+		}
+		candidates = append(candidates, candidate{name: name, score: score})
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	best := candidates[0]
+	tied := false
+	for _, candidate := range candidates[1:] {
+		if candidate.score > best.score {
+			best = candidate
+			tied = false
+			continue
+		}
+		if candidate.score == best.score {
+			tied = true
+		}
+	}
+	if tied && best.score == 1 {
+		return ""
+	}
+	return best.name
+}
+
 // --- Helpers ---
 
 type modelMeta struct {
@@ -990,6 +1085,11 @@ func inferModelCapabilities(name, filename string) storage.ModelCapabilities {
 		Tools:      false,
 		Thinking:   strings.Contains(combined, "qwen3") || strings.Contains(combined, "deepseek-r1"),
 	}
+}
+
+func isMMProjFilename(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasSuffix(lower, ".gguf") && strings.Contains(lower, "mmproj")
 }
 
 func inferRecommendedSettings(meta modelMeta) storage.RecommendedModelSettings {

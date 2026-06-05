@@ -165,6 +165,7 @@ func TestOllamaModelEndpointGoldenResponses(t *testing.T) {
 				"general.file_path":  tmp + "/golden-q4.gguf",
 				"general.sha256":     strings.Repeat("a", 64),
 				"general.source_url": "ollama://golden:latest",
+				"general.mmproj":     "",
 			},
 		})
 	})

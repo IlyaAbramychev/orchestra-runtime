@@ -283,17 +283,18 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 		t.Fatalf("registry: %v", err)
 	}
 	if err := registry.Add(&storage.ModelEntry{
-		ID:         "embed",
-		Name:       "bge-embed",
-		Filename:   "bge-small-embed-q4.gguf",
-		Status:     "ready",
-		Family:     "bge",
-		Parameters: "1B",
-		Template:   "{{ .Prompt }}",
-		System:     "Answer briefly.",
-		License:    []string{"Apache-2.0"},
-		StopTokens: []string{"<|end|>"},
-		SourceURL:  "ollama://library/bge-embed:latest",
+		ID:             "embed",
+		Name:           "bge-embed",
+		Filename:       "bge-small-embed-q4.gguf",
+		Status:         "ready",
+		Family:         "bge",
+		Parameters:     "1B",
+		Template:       "{{ .Prompt }}",
+		System:         "Answer briefly.",
+		License:        []string{"Apache-2.0"},
+		StopTokens:     []string{"<|end|>"},
+		SourceURL:      "ollama://library/bge-embed:latest",
+		MMProjFilename: "bge-embed-mmproj-f16.gguf",
 	}); err != nil {
 		t.Fatalf("add model: %v", err)
 	}
@@ -318,6 +319,7 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 		Template            string                         `json:"template"`
 		System              string                         `json:"system"`
 		License             []string                       `json:"license"`
+		ModelInfo           map[string]any                 `json:"model_info"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -348,6 +350,9 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 	}
 	if len(resp.License) != 1 || resp.License[0] != "Apache-2.0" {
 		t.Fatalf("license = %#v", resp.License)
+	}
+	if resp.ModelInfo["general.mmproj"] != "bge-embed-mmproj-f16.gguf" {
+		t.Fatalf("general.mmproj = %#v", resp.ModelInfo["general.mmproj"])
 	}
 }
 

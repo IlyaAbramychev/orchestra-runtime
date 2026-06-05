@@ -52,11 +52,12 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   streaming tool calls are supported as buffered NDJSON responses, not
   token-level deltas.
 - `/api/chat` message `images` and `/api/generate` `images` support
-  multimodal prompts when the runtime is started with
-  `ORCHESTRA_MMPROJ_PATH=/path/to/mmproj.gguf` and the loaded model is
-  compatible with that projector. Without `ORCHESTRA_MMPROJ_PATH`, requests
-  fail fast with a clear configuration error instead of being silently
-  ignored.
+  multimodal prompts when the runtime has either a global
+  `ORCHESTRA_MMPROJ_PATH=/path/to/mmproj.gguf` or a model-scoped
+  `mmproj_filename` in registry metadata; imported models also auto-detect a
+  sibling `*mmproj*.gguf` in the same directory. The loaded model must still
+  be compatible with that projector. Without a resolved projector, requests
+  fail fast with a clear configuration error instead of being silently ignored.
 - `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
   `<think>...</think>` model output into `message.thinking` or `thinking` for
   non-streaming responses and buffered NDJSON streams.
@@ -82,8 +83,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 2. Advanced request parity
    - Token-level streaming tool-call/thinking deltas and tool-result lifecycle
      hardening.
-   - Multimodal operational maturity: mmproj auto-discovery or model-scoped
-     configuration, compatibility fixtures, and broader client coverage.
+   - Multimodal operational maturity: compatibility fixtures, better
+     ambiguity handling when multiple mmproj files exist, and broader client
+     coverage.
    - Broader JSON Schema compatibility fixtures against Ollama clients.
    - Backend-level thinking controls.
 

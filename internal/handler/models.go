@@ -108,6 +108,7 @@ func (h *ModelsHandler) Pull(w http.ResponseWriter, r *http.Request) {
 		Family:              req.Family,
 		Parameters:          req.Parameters,
 		SHA256:              req.SHA256,
+		MMProjFilename:      req.MMProjFilename,
 		Template:            req.Template,
 		StopTokens:          append([]string(nil), req.StopTokens...),
 		Capabilities:        toStorageCapabilitiesPtr(req.Capabilities),
@@ -752,6 +753,7 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 			"general.file_path":  entry.FilePath,
 			"general.sha256":     entry.SHA256,
 			"general.source_url": entry.SourceURL,
+			"general.mmproj":     entry.MMProjFilename,
 		},
 	})
 }
@@ -817,6 +819,7 @@ func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
 		RecommendedSettings: toRecommendedSettings(e.RecommendedSettings),
 		SourceURL:           e.SourceURL,
 		SHA256:              e.SHA256,
+		MMProjFilename:      e.MMProjFilename,
 		Status:              e.Status,
 		ErrorMessage:        e.ErrorMessage,
 		FilePath:            e.FilePath,

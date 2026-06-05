@@ -28,6 +28,7 @@ type ModelEntry struct {
 	RecommendedSettings RecommendedModelSettings `json:"recommended_settings"`
 	SourceURL           string                   `json:"source_url"`
 	SHA256              string                   `json:"sha256,omitempty"`
+	MMProjFilename      string                   `json:"mmproj_filename,omitempty"`
 	Status              string                   `json:"status"`
 	ErrorMessage        string                   `json:"error_message,omitempty"`
 	FilePath            string                   `json:"file_path"`

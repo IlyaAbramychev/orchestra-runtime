@@ -128,6 +128,83 @@ func TestInferenceAutoLoadsRequestedModel(t *testing.T) {
 	}
 }
 
+func TestInferenceAutoLoadsModelScopedMMProj(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "qwen2.5-vl.gguf")
+	mmprojPath := filepath.Join(tmp, "qwen2.5-vl-mmproj-f16.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := os.WriteFile(mmprojPath, []byte("mmproj"), 0644); err != nil {
+		t.Fatalf("write mmproj: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:             "model-1",
+		Name:           "qwen2.5-vl",
+		Filename:       "qwen2.5-vl.gguf",
+		Status:         "ready",
+		FilePath:       modelPath,
+		MMProjFilename: filepath.Base(mmprojPath),
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "qwen2.5-vl",
+		Messages: []model.ChatMessage{{Role: "user", Content: "describe", Images: []string{"aGVsbG8="}}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if backend.lastOpts.MMProjPath != mmprojPath {
+		t.Fatalf("expected mmproj path %q, got %q", mmprojPath, backend.lastOpts.MMProjPath)
+	}
+}
+
+func TestImportFromDirectoryDetectsMMProjSibling(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	backend := &autoLoadBackend{}
+	manager := NewModelManager(registry, backend, tmp)
+
+	modelDir := filepath.Join(tmp, "author", "vision-model")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	modelPath := filepath.Join(modelDir, "vision-model-q4_k_m.gguf")
+	mmprojPath := filepath.Join(modelDir, "vision-model-mmproj-f16.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := os.WriteFile(mmprojPath, []byte("mmproj"), 0644); err != nil {
+		t.Fatalf("write mmproj: %v", err)
+	}
+
+	imported, err := manager.ImportFromDirectory(tmp)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(imported) != 1 {
+		t.Fatalf("expected one imported model, got %d", len(imported))
+	}
+	if imported[0].MMProjFilename != filepath.Base(mmprojPath) {
+		t.Fatalf("expected mmproj filename %q, got %q", filepath.Base(mmprojPath), imported[0].MMProjFilename)
+	}
+}
+
 func TestEmbeddingAutoLoadsRequestedModel(t *testing.T) {
 	tmp := t.TempDir()
 	registry, err := storage.NewModelRegistry(tmp)
