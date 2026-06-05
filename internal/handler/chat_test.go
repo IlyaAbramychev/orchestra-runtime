@@ -153,16 +153,25 @@ func TestOllamaChatFormatJSONRejectsInvalidModelOutput(t *testing.T) {
 	}
 }
 
-func TestOllamaChatFormatRejectsStreaming(t *testing.T) {
-	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+func TestOllamaChatFormatStreamsBuffered(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+		streamChunks: []engine.CompletionChunk{
+			{Text: `{"answer":"ok"}`},
+			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
+		},
+	}, 1))
 	body := bytes.NewBufferString(`{"model":"test","format":"json","messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
 
 	h.ChatOllama(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
+	if len(chunks) != 2 || chunks[0].Message.Content != `{"answer":"ok"}` || !chunks[1].Done {
+		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }
 
@@ -186,16 +195,25 @@ func TestOllamaChatThinkSeparatesThinking(t *testing.T) {
 	}
 }
 
-func TestOllamaChatThinkRejectsStreaming(t *testing.T) {
-	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+func TestOllamaChatThinkStreamsBuffered(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+		streamChunks: []engine.CompletionChunk{
+			{Text: `<think>reasoning trace</think>final answer`},
+			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
+		},
+	}, 1))
 	body := bytes.NewBufferString(`{"model":"test","think":true,"messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
 
 	h.ChatOllama(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
+	if len(chunks) != 3 || chunks[0].Message.Thinking != "reasoning trace" || chunks[1].Message.Content != "final answer" || !chunks[2].Done {
+		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }
 
@@ -251,16 +269,25 @@ func TestOllamaChatToolCallsResponseShape(t *testing.T) {
 	}
 }
 
-func TestOllamaChatToolsRejectStreaming(t *testing.T) {
-	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+func TestOllamaChatToolsStreamBuffered(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+		streamChunks: []engine.CompletionChunk{
+			{Text: `{"tool_calls":[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]}`},
+			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
+		},
+	}, 1))
 	body := bytes.NewBufferString(`{"model":"test","tools":[{"type":"function","function":{"name":"get_weather"}}],"messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
 
 	h.ChatOllama(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
+	if len(chunks) != 2 || len(chunks[0].Message.ToolCalls) != 1 || chunks[1].DoneReason != "tool_calls" {
+		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }
 
@@ -436,4 +463,21 @@ func TestOllamaChatStreamErrorReturnsDoneErrorChunk(t *testing.T) {
 	if !chunks[1].Done || chunks[1].DoneReason != "error" || chunks[1].Error != "decode failed" {
 		t.Fatalf("unexpected error chunk: %+v", chunks[1])
 	}
+}
+
+func decodeOllamaChatStream(t *testing.T, body []byte) []model.OllamaChatResponse {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	var chunks []model.OllamaChatResponse
+	for scanner.Scan() {
+		var chunk model.OllamaChatResponse
+		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+			t.Fatalf("decode chunk: %v", err)
+		}
+		chunks = append(chunks, chunk)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan stream: %v", err)
+	}
+	return chunks
 }

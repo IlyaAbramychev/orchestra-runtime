@@ -89,16 +89,25 @@ func TestGenerateFormatSchemaRejectsNonConformingOutput(t *testing.T) {
 	}
 }
 
-func TestGenerateFormatRejectsStreaming(t *testing.T) {
-	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+func TestGenerateFormatStreamsBuffered(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{
+		streamChunks: []engine.CompletionChunk{
+			{Text: `{"answer":"ok"}`},
+			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
+		},
+	}, 1))
 	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
 	rec := httptest.NewRecorder()
 
 	h.Generate(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeGenerateStream(t, rec.Body.Bytes())
+	if len(chunks) != 2 || chunks[0].Response != `{"answer":"ok"}` || !chunks[1].Done {
+		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }
 
@@ -122,16 +131,25 @@ func TestGenerateThinkSeparatesThinking(t *testing.T) {
 	}
 }
 
-func TestGenerateThinkRejectsStreaming(t *testing.T) {
-	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+func TestGenerateThinkStreamsBuffered(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{
+		streamChunks: []engine.CompletionChunk{
+			{Text: `<think>reasoning trace</think>final answer`},
+			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
+		},
+	}, 1))
 	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","think":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
 	rec := httptest.NewRecorder()
 
 	h.Generate(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeGenerateStream(t, rec.Body.Bytes())
+	if len(chunks) != 3 || chunks[0].Thinking != "reasoning trace" || chunks[1].Response != "final answer" || !chunks[2].Done {
+		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }
 
@@ -167,4 +185,21 @@ func TestGenerateStreamErrorReturnsDoneErrorChunk(t *testing.T) {
 	if !chunks[1].Done || chunks[1].DoneReason != "error" || chunks[1].Error != "decode failed" {
 		t.Fatalf("unexpected error chunk: %+v", chunks[1])
 	}
+}
+
+func decodeGenerateStream(t *testing.T, body []byte) []model.GenerateResponse {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	var chunks []model.GenerateResponse
+	for scanner.Scan() {
+		var chunk model.GenerateResponse
+		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+			t.Fatalf("decode chunk: %v", err)
+		}
+		chunks = append(chunks, chunk)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan stream: %v", err)
+	}
+	return chunks
 }

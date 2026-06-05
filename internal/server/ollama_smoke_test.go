@@ -71,6 +71,13 @@ func TestOllamaCompatibilitySmokeSuite(t *testing.T) {
 		}
 	})
 
+	t.Run("chat tool calls stream", func(t *testing.T) {
+		chunks := smokeChatStream(t, server.URL, `{"model":"chat-smoke:latest","tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"call tool stream"}]}`)
+		if len(chunks) != 2 || len(chunks[0].Message.ToolCalls) != 1 || chunks[1].DoneReason != "tool_calls" {
+			t.Fatalf("unexpected streaming tool chunks: %+v", chunks)
+		}
+	})
+
 	t.Run("chat thinking", func(t *testing.T) {
 		var resp model.OllamaChatResponse
 		smokeJSON(t, server.URL, http.MethodPost, "/api/chat",
@@ -91,37 +98,15 @@ func TestOllamaCompatibilitySmokeSuite(t *testing.T) {
 		}
 	})
 
+	t.Run("generate schema stream", func(t *testing.T) {
+		chunks := smokeGenerateStream(t, server.URL, `{"model":"chat-smoke:latest","prompt":"schema","format":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}}`)
+		if len(chunks) != 2 || chunks[0].Response != `{"answer":"ok"}` || !chunks[1].Done {
+			t.Fatalf("unexpected schema stream chunks: %+v", chunks)
+		}
+	})
+
 	t.Run("generate stream", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/generate", strings.NewReader(
-			`{"model":"chat-smoke:latest","prompt":"stream"}`,
-		))
-		if err != nil {
-			t.Fatalf("build request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("request: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d", resp.StatusCode)
-		}
-		if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-ndjson") {
-			t.Fatalf("content type = %q", got)
-		}
-		var chunks []model.GenerateResponse
-		decoder := json.NewDecoder(resp.Body)
-		for {
-			var chunk model.GenerateResponse
-			if err := decoder.Decode(&chunk); err != nil {
-				if err == io.EOF {
-					break
-				}
-				t.Fatalf("decode stream: %v", err)
-			}
-			chunks = append(chunks, chunk)
-		}
+		chunks := smokeGenerateStream(t, server.URL, `{"model":"chat-smoke:latest","prompt":"stream"}`)
 		if len(chunks) != 2 || chunks[0].Response != "smoke" || !chunks[1].Done {
 			t.Fatalf("unexpected stream chunks: %+v", chunks)
 		}
@@ -201,6 +186,70 @@ func addSmokeModel(t *testing.T, registry *storage.ModelRegistry, dir, id, name 
 	}
 }
 
+func smokeChatStream(t *testing.T, baseURL, body string) []model.OllamaChatResponse {
+	t.Helper()
+	resp := smokeStreamResponse(t, baseURL, "/api/chat", body)
+	defer resp.Body.Close()
+
+	var chunks []model.OllamaChatResponse
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		var chunk model.OllamaChatResponse
+		if err := decoder.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode chat stream: %v", err)
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func smokeGenerateStream(t *testing.T, baseURL, body string) []model.GenerateResponse {
+	t.Helper()
+	resp := smokeStreamResponse(t, baseURL, "/api/generate", body)
+	defer resp.Body.Close()
+
+	var chunks []model.GenerateResponse
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		var chunk model.GenerateResponse
+		if err := decoder.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decode generate stream: %v", err)
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func smokeStreamResponse(t *testing.T, baseURL, path, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(resp.Body)
+		t.Fatalf("%s status = %d: %s", path, resp.StatusCode, buf.String())
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-ndjson") {
+		resp.Body.Close()
+		t.Fatalf("content type = %q", got)
+	}
+	return resp
+}
+
 func smokeJSON(t *testing.T, baseURL, method, path, body string, wantStatus int, out any) {
 	t.Helper()
 	var reader *strings.Reader
@@ -268,9 +317,21 @@ func (b *ollamaSmokeBackend) Complete(_ context.Context, messages []engine.ChatM
 		Timings:          engine.Timings{TotalNs: 10, PromptEvalNs: 4, EvalNs: 6},
 	}, nil
 }
-func (b *ollamaSmokeBackend) CompleteStream(context.Context, []engine.ChatMessage, engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
+func (b *ollamaSmokeBackend) CompleteStream(_ context.Context, messages []engine.ChatMessage, _ engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
+	text := "smoke"
+	if len(messages) > 0 {
+		content := messages[len(messages)-1].Content
+		switch {
+		case strings.Contains(content, "call tool"):
+			text = `{"tool_calls":[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]}`
+		case strings.Contains(content, "think"):
+			text = `<think>smoke reasoning</think>smoke answer`
+		case strings.Contains(content, "schema"):
+			text = `{"answer":"ok"}`
+		}
+	}
 	ch := make(chan engine.CompletionChunk, 2)
-	ch <- engine.CompletionChunk{Text: "smoke"}
+	ch <- engine.CompletionChunk{Text: text}
 	ch <- engine.CompletionChunk{
 		Done:             true,
 		FinishReason:     "stop",

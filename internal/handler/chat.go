@@ -66,20 +66,8 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 	if req.Stream != nil {
 		stream = *req.Stream
 	}
-	if stream && hasMeaningfulRawJSON(req.Think) {
-		writeError(w, http.StatusBadRequest, "streaming thinking output is not supported yet")
-		return
-	}
 	if len(req.Tools) > 0 && hasMeaningfulRawJSON(req.Format) {
 		writeError(w, http.StatusBadRequest, "format cannot be combined with tools")
-		return
-	}
-	if stream && hasMeaningfulRawJSON(req.Format) {
-		writeError(w, http.StatusBadRequest, "streaming structured output is not supported yet")
-		return
-	}
-	if stream && len(req.Tools) > 0 {
-		writeError(w, http.StatusBadRequest, "streaming tool calls are not supported yet")
 		return
 	}
 
@@ -97,10 +85,18 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 		chatReq.Messages = withStructuredInstruction(chatReq.Messages, instruction)
 	}
 	if stream {
+		if shouldBufferOllamaChatStream(&req) {
+			h.handleOllamaBufferedStream(w, r, &req, chatReq)
+			return
+		}
 		h.handleOllamaStream(w, r, &req, chatReq)
 		return
 	}
 	h.handleOllamaComplete(w, r, &req, chatReq)
+}
+
+func shouldBufferOllamaChatStream(req *model.OllamaChatRequest) bool {
+	return hasMeaningfulRawJSON(req.Format) || hasMeaningfulRawJSON(req.Think) || len(req.Tools) > 0
 }
 
 func (h *ChatHandler) handleOllamaComplete(
@@ -221,6 +217,103 @@ func (h *ChatHandler) handleOllamaStream(
 	}
 
 	h.inference.ApplyKeepAlive(req.KeepAlive)
+}
+
+func (h *ChatHandler) handleOllamaBufferedStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	req *model.OllamaChatRequest,
+	chatReq *model.ChatCompletionRequest,
+) {
+	ch, err := h.inference.CompleteStream(r.Context(), chatReq)
+	if err != nil {
+		slog.Error("ollama buffered chat stream failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+	text, final, err := collectCompletionStream(ch)
+	if err != nil {
+		slog.Error("ollama buffered chat stream chunk error", "error", err)
+		writeRuntimeError(w, err)
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+
+	content, thinking := applyThinkingOutput(req.Think, text)
+	toolCalls, hasToolCalls, err := parseToolCallsFromText(content, req.Tools)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+	if err := validateStructuredOutput(req.Format, content); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if hasToolCalls {
+		writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
+			Model:     req.Model,
+			CreatedAt: createdAt,
+			Message: model.ChatMessage{
+				Role:      "assistant",
+				Content:   "",
+				ToolCalls: toolCalls,
+			},
+		})
+	} else {
+		if thinking != "" {
+			writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
+				Model:     req.Model,
+				CreatedAt: createdAt,
+				Message:   model.ChatMessage{Role: "assistant", Thinking: thinking},
+			})
+		}
+		if content != "" {
+			writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
+				Model:     req.Model,
+				CreatedAt: createdAt,
+				Message:   model.ChatMessage{Role: "assistant", Content: content},
+			})
+		}
+	}
+
+	doneReason := final.FinishReason
+	if hasToolCalls {
+		doneReason = "tool_calls"
+	}
+	writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
+		Model:                req.Model,
+		CreatedAt:            createdAt,
+		Done:                 true,
+		DoneReason:           doneReason,
+		TotalDurationNs:      final.Timings.TotalNs,
+		PromptEvalDurationNs: final.Timings.PromptEvalNs,
+		PromptEvalCount:      final.PromptTokens,
+		EvalDurationNs:       final.Timings.EvalNs,
+		EvalCount:            final.CompletionTokens,
+	})
+	h.inference.ApplyKeepAlive(req.KeepAlive)
+}
+
+func writeOllamaChatStreamResponse(w http.ResponseWriter, flusher http.Flusher, resp model.OllamaChatResponse) {
+	if data, err := json.Marshal(resp); err == nil {
+		fmt.Fprintf(w, "%s\n", data)
+		flusher.Flush()
+	}
 }
 
 func (h *ChatHandler) handleComplete(w http.ResponseWriter, r *http.Request, req *model.ChatCompletionRequest) {

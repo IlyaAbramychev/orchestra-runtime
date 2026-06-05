@@ -49,13 +49,17 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   object is provided; grammar-constrained decoding is not implemented yet.
 - `/api/chat` accepts Ollama `tools` in non-streaming mode and returns parsed
   `message.tool_calls`. Tool execution remains the client's responsibility;
-  streaming tool-call deltas are not implemented yet.
+  streaming tool calls are supported as buffered NDJSON responses, not
+  token-level deltas.
 - `/api/chat` message `images` and `/api/generate` `images` are recognized and
   rejected with a clear unsupported-feature error instead of being silently
   ignored.
 - `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
   `<think>...</think>` model output into `message.thinking` or `thinking` for
-  non-streaming responses. Streaming thinking output is not implemented yet.
+  non-streaming responses and buffered NDJSON streams.
+- `/api/chat` and `/api/generate` support streaming structured output as a
+  buffered NDJSON response: the runtime validates the final JSON/schema output
+  before emitting stream chunks.
 - `/api/capabilities` exposes machine-readable feature detection for supported,
   partial, extension, and unsupported compatibility behavior.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
@@ -73,10 +77,11 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
    - Blob endpoints only if full Ollama manifest support requires them.
 
 2. Advanced request parity
-   - Streaming tool-call deltas and tool-result lifecycle hardening.
+   - Token-level streaming tool-call/thinking deltas and tool-result lifecycle
+     hardening.
    - Multimodal inference with image embeddings and mmproj loading.
-   - Streaming structured output and grammar-constrained decoding.
-   - Streaming thinking accumulation and backend-level thinking controls.
+   - Grammar-constrained decoding.
+   - Backend-level thinking controls.
 
 3. Operational maturity
    - Keep Orchestra extensions additive and avoid changing Ollama field names.

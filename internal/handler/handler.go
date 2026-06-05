@@ -208,6 +208,22 @@ func validateJSONSchema(schemaRaw json.RawMessage, output string) error {
 	return nil
 }
 
+func collectCompletionStream(ch <-chan engine.CompletionChunk) (string, engine.CompletionChunk, error) {
+	var text strings.Builder
+	var final engine.CompletionChunk
+	for chunk := range ch {
+		if chunk.Err != nil {
+			return "", engine.CompletionChunk{}, chunk.Err
+		}
+		if chunk.Done {
+			final = chunk
+			return text.String(), final, nil
+		}
+		text.WriteString(chunk.Text)
+	}
+	return text.String(), final, nil
+}
+
 func validateThinkOption(raw json.RawMessage) error {
 	if !hasMeaningfulRawJSON(raw) {
 		return nil

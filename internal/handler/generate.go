@@ -48,21 +48,21 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 	if req.Stream != nil {
 		stream = *req.Stream
 	}
-	if stream && hasMeaningfulRawJSON(req.Think) {
-		writeError(w, http.StatusBadRequest, "streaming thinking output is not supported yet")
-		return
-	}
-	if stream && hasMeaningfulRawJSON(req.Format) {
-		writeError(w, http.StatusBadRequest, "streaming structured output is not supported yet")
-		return
-	}
 
 	params := toEngineParamsFromGenerate(&req)
 	if stream {
+		if shouldBufferOllamaGenerateStream(&req) {
+			h.handleBufferedStream(w, r, &req, params)
+			return
+		}
 		h.handleStream(w, r, &req, params)
 		return
 	}
 	h.handleComplete(w, r, &req, params)
+}
+
+func shouldBufferOllamaGenerateStream(req *model.GenerateRequest) bool {
+	return hasMeaningfulRawJSON(req.Format) || hasMeaningfulRawJSON(req.Think)
 }
 
 // Completion handles POST /v1/completions using OpenAI's legacy completions
@@ -296,6 +296,85 @@ func (h *GenerateHandler) handleStream(
 	}
 
 	h.inference.ApplyKeepAlive(req.KeepAlive)
+}
+
+func (h *GenerateHandler) handleBufferedStream(
+	w http.ResponseWriter, r *http.Request, req *model.GenerateRequest, params engine.CompletionParams,
+) {
+	prompt, system := req.Prompt, req.System
+	if instruction, ok, err := structuredFormatInstruction(req.Format); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if ok {
+		system = appendInstruction(system, instruction)
+	}
+
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, system, params)
+	if err != nil {
+		slog.Error("generate buffered stream failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+	text, final, err := collectCompletionStream(ch)
+	if err != nil {
+		slog.Error("generate buffered stream chunk error", "error", err)
+		writeRuntimeError(w, err)
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+
+	content, thinking := applyThinkingOutput(req.Think, text)
+	if err := validateStructuredOutput(req.Format, content); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		h.inference.ApplyKeepAlive(req.KeepAlive)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if thinking != "" {
+		writeOllamaGenerateStreamResponse(w, flusher, model.GenerateResponse{
+			Model:     req.Model,
+			CreatedAt: createdAt,
+			Thinking:  thinking,
+		})
+	}
+	if content != "" {
+		writeOllamaGenerateStreamResponse(w, flusher, model.GenerateResponse{
+			Model:     req.Model,
+			CreatedAt: createdAt,
+			Response:  content,
+		})
+	}
+	writeOllamaGenerateStreamResponse(w, flusher, model.GenerateResponse{
+		Model:                req.Model,
+		CreatedAt:            createdAt,
+		Done:                 true,
+		DoneReason:           final.FinishReason,
+		TotalDurationNs:      final.Timings.TotalNs,
+		PromptEvalDurationNs: final.Timings.PromptEvalNs,
+		PromptEvalCount:      final.PromptTokens,
+		EvalDurationNs:       final.Timings.EvalNs,
+		EvalCount:            final.CompletionTokens,
+	})
+	h.inference.ApplyKeepAlive(req.KeepAlive)
+}
+
+func writeOllamaGenerateStreamResponse(w http.ResponseWriter, flusher http.Flusher, resp model.GenerateResponse) {
+	if data, err := json.Marshal(resp); err == nil {
+		fmt.Fprintf(w, "%s\n", data)
+		flusher.Flush()
+	}
 }
 
 // toEngineParamsFromGenerate maps /api/generate's nested options → engine params.
