@@ -60,6 +60,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   partial, extension, and unsupported compatibility behavior.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
+- A router-level Ollama compatibility smoke suite covers version, capabilities,
+  tags, chat, generate streaming, structured output, tool calls, thinking,
+  explicit image rejection, and embeddings.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
 - Durations in chat and generate responses are returned in nanoseconds.
 
@@ -78,4 +81,4 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 3. Operational maturity
    - Keep Orchestra extensions additive and avoid changing Ollama field names.
    - Stable error codes and HTTP mappings.
-   - Release smoke tests against an Ollama-client compatibility suite.
+   - Expand release smoke tests against real Ollama SDK/client flows.
