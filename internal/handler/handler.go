@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/model"
 	"github.com/operium/orchestra-runtime/internal/rpc"
@@ -173,6 +175,35 @@ func validateStructuredOutput(raw json.RawMessage, text string) error {
 		if _, ok := output.(map[string]any); !ok {
 			return fmt.Errorf("model returned JSON, but format \"json\" requires an object")
 		}
+		return nil
+	}
+	if _, ok := format.(map[string]any); ok {
+		if err := validateJSONSchema(raw, trimmed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateJSONSchema(schemaRaw json.RawMessage, output string) error {
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaRaw))
+	if err != nil {
+		return fmt.Errorf("format schema is invalid")
+	}
+	outputDoc, err := jsonschema.UnmarshalJSON(strings.NewReader(output))
+	if err != nil {
+		return fmt.Errorf("model returned invalid JSON for requested format")
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("schema.json", schemaDoc); err != nil {
+		return fmt.Errorf("format schema is invalid")
+	}
+	schema, err := compiler.Compile("schema.json")
+	if err != nil {
+		return fmt.Errorf("format schema is invalid")
+	}
+	if err := schema.Validate(outputDoc); err != nil {
+		return fmt.Errorf("model returned JSON that does not conform to requested schema: %w", err)
 	}
 	return nil
 }

@@ -45,7 +45,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   model. It updates registry metadata and shares the base GGUF artifact.
 - `/api/chat` and `/api/generate` accept Ollama's `format` for non-streaming
   structured output. The runtime steers the prompt and validates that the final
-  response is valid JSON; grammar-constrained decoding is not implemented yet.
+  response is valid JSON and conforms to the requested JSON Schema when a schema
+  object is provided; grammar-constrained decoding is not implemented yet.
 - `/api/chat` accepts Ollama `tools` in non-streaming mode and returns parsed
   `message.tool_calls`. Tool execution remains the client's responsibility;
   streaming tool-call deltas are not implemented yet.
@@ -69,7 +70,7 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 2. Advanced request parity
    - Streaming tool-call deltas and tool-result lifecycle hardening.
    - Multimodal inference with image embeddings and mmproj loading.
-   - Streaming structured output and grammar-constrained JSON/schema decoding.
+   - Streaming structured output and grammar-constrained decoding.
    - Streaming thinking accumulation and backend-level thinking controls.
 
 3. Operational maturity

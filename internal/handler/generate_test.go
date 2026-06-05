@@ -67,6 +67,28 @@ func TestGenerateFormatJSONRejectsInvalidModelOutput(t *testing.T) {
 	}
 }
 
+func TestGenerateFormatSchemaRejectsNonConformingOutput(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{completeText: `{"answer":123}`}, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"prompt":"hi",
+		"stream":false,
+		"format":{
+			"type":"object",
+			"properties":{"answer":{"type":"string"}},
+			"required":["answer"]
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGenerateFormatRejectsStreaming(t *testing.T) {
 	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
 	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json"}`)
