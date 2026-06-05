@@ -19,7 +19,6 @@ func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 	cases := []string{
 		`{"model":"test","prompt":"hi","template":"{{ .Prompt }}"}`,
 		`{"model":"test","prompt":"hi","context":[1,2,3]}`,
-		`{"model":"test","prompt":"hi","images":["aGVsbG8="]}`,
 		`{"model":"test","prompt":"hi","suffix":"end"}`,
 	}
 	for _, body := range cases {
@@ -31,6 +30,38 @@ func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestGenerateImagesRequireMMProj(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(`{"model":"test","prompt":"hi","images":["aGVsbG8="]}`))
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("ORCHESTRA_MMPROJ_PATH")) {
+		t.Fatalf("expected mmproj hint, got %s", rec.Body.String())
+	}
+}
+
+func TestGenerateImagesForwardWhenEnabled(t *testing.T) {
+	backend := &fakeChatBackend{}
+	h := NewGenerateHandler(service.NewInferenceService(backend, 1))
+	h.SetMultimodalEnabled(true)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(`{"model":"test","prompt":"hi","images":["aGVsbG8="],"stream":false}`))
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(backend.lastMessages) != 1 || len(backend.lastMessages[0].Images) != 1 {
+		t.Fatalf("expected image payload forwarded to backend, got %+v", backend.lastMessages)
 	}
 }
 

@@ -26,6 +26,8 @@ type fakeChatBackend struct {
 	block            chan struct{}
 	lastParams       engine.CompletionParams
 	lastStreamParams engine.CompletionParams
+	lastMessages     []engine.ChatMessage
+	lastStreamMsgs   []engine.ChatMessage
 }
 
 func (f *fakeChatBackend) InitBackend()                                       {}
@@ -37,8 +39,9 @@ func (f *fakeChatBackend) IsLoaded() bool                                     { 
 func (f *fakeChatBackend) LoadedModelID() string                              { return "test" }
 func (f *fakeChatBackend) State() string                                      { return engine.StateReady }
 func (f *fakeChatBackend) ModelDesc() string                                  { return "" }
-func (f *fakeChatBackend) Complete(_ context.Context, _ []engine.ChatMessage, params engine.CompletionParams) (*engine.CompletionResult, error) {
+func (f *fakeChatBackend) Complete(_ context.Context, messages []engine.ChatMessage, params engine.CompletionParams) (*engine.CompletionResult, error) {
 	f.lastParams = params
+	f.lastMessages = append([]engine.ChatMessage(nil), messages...)
 	if f.completeErr != nil {
 		return nil, f.completeErr
 	}
@@ -61,8 +64,9 @@ func (f *fakeChatBackend) Complete(_ context.Context, _ []engine.ChatMessage, pa
 		},
 	}, nil
 }
-func (f *fakeChatBackend) CompleteStream(_ context.Context, _ []engine.ChatMessage, params engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
+func (f *fakeChatBackend) CompleteStream(_ context.Context, messages []engine.ChatMessage, params engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
 	f.lastStreamParams = params
+	f.lastStreamMsgs = append([]engine.ChatMessage(nil), messages...)
 	if f.streamErr != nil {
 		return nil, f.streamErr
 	}
@@ -313,6 +317,27 @@ func TestOllamaChatImagesRejectUnsupported(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("ORCHESTRA_MMPROJ_PATH")) {
+		t.Fatalf("expected mmproj hint, got %s", rec.Body.String())
+	}
+}
+
+func TestOllamaChatImagesForwardWhenEnabled(t *testing.T) {
+	backend := &fakeChatBackend{}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	h.SetMultimodalEnabled(true)
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"messages":[{"role":"user","content":"what is this?","images":["aGVsbG8="]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(backend.lastMessages) != 1 || len(backend.lastMessages[0].Images) != 1 {
+		t.Fatalf("expected image payload forwarded to backend, got %+v", backend.lastMessages)
 	}
 }
 

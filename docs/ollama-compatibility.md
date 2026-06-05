@@ -51,8 +51,11 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   `message.tool_calls`. Tool execution remains the client's responsibility;
   streaming tool calls are supported as buffered NDJSON responses, not
   token-level deltas.
-- `/api/chat` message `images` and `/api/generate` `images` are recognized and
-  rejected with a clear unsupported-feature error instead of being silently
+- `/api/chat` message `images` and `/api/generate` `images` support
+  multimodal prompts when the runtime is started with
+  `ORCHESTRA_MMPROJ_PATH=/path/to/mmproj.gguf` and the loaded model is
+  compatible with that projector. Without `ORCHESTRA_MMPROJ_PATH`, requests
+  fail fast with a clear configuration error instead of being silently
   ignored.
 - `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
   `<think>...</think>` model output into `message.thinking` or `thinking` for
@@ -66,7 +69,7 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   generate, tags, show, ps, pull, delete, and version.
 - A router-level Ollama compatibility smoke suite covers version, capabilities,
   tags, chat, generate streaming, structured output, tool calls, thinking,
-  explicit image rejection, and embeddings.
+  multimodal configuration gating, and embeddings.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
 - Durations in chat and generate responses are returned in nanoseconds.
 
@@ -79,7 +82,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 2. Advanced request parity
    - Token-level streaming tool-call/thinking deltas and tool-result lifecycle
      hardening.
-   - Multimodal inference with image embeddings and mmproj loading.
+   - Multimodal operational maturity: mmproj auto-discovery or model-scoped
+     configuration, compatibility fixtures, and broader client coverage.
    - Broader JSON Schema compatibility fixtures against Ollama clients.
    - Backend-level thinking controls.
 

@@ -2,6 +2,8 @@
 #define LLAMA_BRIDGE_H
 
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #include <stdbool.h>
 #include <stdlib.h>
 
@@ -65,12 +67,30 @@ typedef struct bridge_schema_grammar_result {
     char *error;
 } bridge_schema_grammar_result;
 
+typedef struct bridge_mtmd_eval_result {
+    int32_t code;
+    int32_t n_past;
+    char *error;
+} bridge_mtmd_eval_result;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 bridge_schema_grammar_result bridge_json_schema_to_grammar(const char *schema_json);
 void bridge_schema_grammar_result_free(bridge_schema_grammar_result result);
+bridge_mtmd_eval_result bridge_mtmd_eval_prompt(
+    mtmd_context *mtmd,
+    struct llama_context *lctx,
+    const char *prompt,
+    const unsigned char **image_data,
+    const size_t *image_lens,
+    size_t n_images,
+    bool add_special,
+    bool parse_special,
+    int32_t n_batch
+);
+void bridge_mtmd_eval_result_free(bridge_mtmd_eval_result result);
 
 #ifdef __cplusplus
 }

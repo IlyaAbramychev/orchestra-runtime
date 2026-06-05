@@ -1,9 +1,9 @@
 package engine
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include
-#cgo CXXFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/common -I${SRCDIR}/../../llama.cpp/vendor
-#cgo LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/common -lcommon -lllama -lggml -lstdc++ -lm
+#cgo CFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/tools/mtmd
+#cgo CXXFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/common -I${SRCDIR}/../../llama.cpp/tools/mtmd -I${SRCDIR}/../../llama.cpp/vendor
+#cgo LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/common -L${SRCDIR}/../../llama.cpp/build/tools/mtmd -lcommon -lmtmd -lllama -lggml -lstdc++ -lm
 #cgo darwin LDFLAGS: -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 #include "llama_bridge.h"
 #include <stdlib.h>
@@ -46,6 +46,119 @@ func JSONSchemaToGrammar(schema string) (string, error) {
 		return "", fmt.Errorf("convert JSON schema to grammar: empty result")
 	}
 	return C.GoString(result.grammar), nil
+}
+
+type mtmdContext struct {
+	ptr *C.mtmd_context
+}
+
+func mtmdContextLoad(path string, model *llamaModel, opts LoadOptions) (*mtmdContext, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if model == nil || model.ptr == nil {
+		return nil, fmt.Errorf("load mmproj: text model is not loaded")
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	params := C.mtmd_context_params_default()
+	params.use_gpu = C.bool(opts.MMProjUseGPU)
+	params.n_threads = C.int(opts.Threads)
+	params.warmup = C.bool(false)
+	switch opts.FlashAttn {
+	case 0:
+		params.flash_attn_type = C.LLAMA_FLASH_ATTN_TYPE_DISABLED
+	case 1:
+		params.flash_attn_type = C.LLAMA_FLASH_ATTN_TYPE_ENABLED
+	}
+
+	ptr := C.mtmd_init_from_file(cPath, model.ptr, params)
+	if ptr == nil {
+		return nil, fmt.Errorf("failed to load mmproj from %s", path)
+	}
+	if !bool(C.mtmd_support_vision(ptr)) {
+		C.mtmd_free(ptr)
+		return nil, fmt.Errorf("mmproj does not support vision input: %s", path)
+	}
+	return &mtmdContext{ptr: ptr}, nil
+}
+
+func (m *mtmdContext) Free() {
+	if m != nil && m.ptr != nil {
+		C.mtmd_free(m.ptr)
+		m.ptr = nil
+	}
+}
+
+func mtmdDefaultMarker() string {
+	return C.GoString(C.mtmd_default_marker())
+}
+
+func mtmdEvalPrompt(mtmd *mtmdContext, lctx *llamaContext, prompt string, images [][]byte, nBatch int) (int, error) {
+	if mtmd == nil || mtmd.ptr == nil {
+		return 0, fmt.Errorf("multimodal images require a loaded mmproj")
+	}
+	if lctx == nil || lctx.ptr == nil {
+		return 0, fmt.Errorf("llama context is not loaded")
+	}
+	if nBatch <= 0 {
+		nBatch = 1
+	}
+
+	cPrompt := C.CString(prompt)
+	defer C.free(unsafe.Pointer(cPrompt))
+
+	var cData unsafe.Pointer
+	var cLens unsafe.Pointer
+	var dataSlice []*C.uchar
+	var lensSlice []C.size_t
+	if len(images) > 0 {
+		cData = C.malloc(C.size_t(len(images)) * C.size_t(unsafe.Sizeof(uintptr(0))))
+		cLens = C.malloc(C.size_t(len(images)) * C.size_t(unsafe.Sizeof(C.size_t(0))))
+		if cData == nil || cLens == nil {
+			if cData != nil {
+				C.free(cData)
+			}
+			if cLens != nil {
+				C.free(cLens)
+			}
+			return 0, fmt.Errorf("allocate image pointer array")
+		}
+		defer C.free(cData)
+		defer C.free(cLens)
+		dataSlice = unsafe.Slice((**C.uchar)(cData), len(images))
+		lensSlice = unsafe.Slice((*C.size_t)(cLens), len(images))
+		for i, img := range images {
+			if len(img) == 0 {
+				return 0, fmt.Errorf("image %d is empty", i)
+			}
+			ptr := C.CBytes(img)
+			defer C.free(ptr)
+			dataSlice[i] = (*C.uchar)(ptr)
+			lensSlice[i] = C.size_t(len(img))
+		}
+	}
+
+	result := C.bridge_mtmd_eval_prompt(
+		mtmd.ptr,
+		lctx.ptr,
+		cPrompt,
+		(**C.uchar)(cData),
+		(*C.size_t)(cLens),
+		C.size_t(len(images)),
+		C.bool(true),
+		C.bool(true),
+		C.int32_t(nBatch),
+	)
+	defer C.bridge_mtmd_eval_result_free(result)
+	if result.error != nil {
+		return int(result.n_past), fmt.Errorf("multimodal prompt eval: %s", C.GoString(result.error))
+	}
+	if result.code != 0 {
+		return int(result.n_past), fmt.Errorf("multimodal prompt eval failed with code %d", int(result.code))
+	}
+	return int(result.n_past), nil
 }
 
 // --- Model ---
@@ -510,6 +623,7 @@ func (s *llamaSampler) Free() {
 type ChatMessage struct {
 	Role    string
 	Content string
+	Images  []string
 }
 
 func ApplyChatTemplate(tmpl string, messages []ChatMessage, addAssistant bool) (string, error) {

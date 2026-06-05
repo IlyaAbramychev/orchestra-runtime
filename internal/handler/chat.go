@@ -13,11 +13,16 @@ import (
 )
 
 type ChatHandler struct {
-	inference *service.InferenceService
+	inference         *service.InferenceService
+	multimodalEnabled bool
 }
 
 func NewChatHandler(inference *service.InferenceService) *ChatHandler {
 	return &ChatHandler{inference: inference}
+}
+
+func (h *ChatHandler) SetMultimodalEnabled(enabled bool) {
+	h.multimodalEnabled = enabled
 }
 
 // ChatCompletion handles POST /v1/chat/completions (OpenAI-compatible).
@@ -54,8 +59,10 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasOllamaChatImages(req.Messages) {
-		writeError(w, http.StatusBadRequest, "multimodal images are not supported yet")
-		return
+		if !h.multimodalEnabled {
+			writeError(w, http.StatusBadRequest, "multimodal images require ORCHESTRA_MMPROJ_PATH")
+			return
+		}
 	}
 	if err := validateThinkOption(req.Think); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

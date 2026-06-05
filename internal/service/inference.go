@@ -117,6 +117,7 @@ func (s *InferenceService) Generate(
 	ctx context.Context,
 	model string,
 	prompt, system string,
+	images []string,
 	params engine.CompletionParams,
 ) (*engine.CompletionResult, error) {
 	if err := s.ensureLoaded(ctx, model); err != nil {
@@ -129,7 +130,7 @@ func (s *InferenceService) Generate(
 	}
 	defer release()
 
-	msgs := buildGenerateMessages(prompt, system, &params)
+	msgs := buildGenerateMessages(prompt, system, images, &params)
 	return s.engine.Complete(ctx, msgs, params)
 }
 
@@ -138,6 +139,7 @@ func (s *InferenceService) GenerateStream(
 	ctx context.Context,
 	model string,
 	prompt, system string,
+	images []string,
 	params engine.CompletionParams,
 ) (<-chan engine.CompletionChunk, error) {
 	if err := s.ensureLoaded(ctx, model); err != nil {
@@ -149,7 +151,7 @@ func (s *InferenceService) GenerateStream(
 		return nil, err
 	}
 
-	msgs := buildGenerateMessages(prompt, system, &params)
+	msgs := buildGenerateMessages(prompt, system, images, &params)
 	ch, err := s.engine.CompleteStream(ctx, msgs, params)
 	if err != nil {
 		release()
@@ -162,15 +164,15 @@ func (s *InferenceService) GenerateStream(
 // buildGenerateMessages chooses between raw-prompt and chat-template modes.
 // If `system` is set, we apply the chat template so per-model formatting
 // works; otherwise we pass the prompt through untouched (RawPrompt=true).
-func buildGenerateMessages(prompt, system string, params *engine.CompletionParams) []engine.ChatMessage {
+func buildGenerateMessages(prompt, system string, images []string, params *engine.CompletionParams) []engine.ChatMessage {
 	if system == "" {
 		params.RawPrompt = true
-		return []engine.ChatMessage{{Role: "user", Content: prompt}}
+		return []engine.ChatMessage{{Role: "user", Content: prompt, Images: append([]string(nil), images...)}}
 	}
 	params.RawPrompt = false
 	return []engine.ChatMessage{
 		{Role: "system", Content: system},
-		{Role: "user", Content: prompt},
+		{Role: "user", Content: prompt, Images: append([]string(nil), images...)},
 	}
 }
 
@@ -220,7 +222,7 @@ func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCo
 func toEngineMessages(msgs []model.ChatMessage) []engine.ChatMessage {
 	result := make([]engine.ChatMessage, len(msgs))
 	for i, m := range msgs {
-		result[i] = engine.ChatMessage{Role: m.Role, Content: m.Content}
+		result[i] = engine.ChatMessage{Role: m.Role, Content: m.Content, Images: append([]string(nil), m.Images...)}
 	}
 	return result
 }

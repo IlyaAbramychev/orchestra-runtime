@@ -13,6 +13,7 @@ type Engine struct {
 	model   *llamaModel
 	ctx     *llamaContext
 	vocab   *llamaVocab
+	mtmd    *mtmdContext
 	sampler *llamaSampler
 	// batchSize mirrors llama_context n_batch for safe prompt prefill chunking.
 	batchSize int
@@ -180,6 +181,7 @@ func (e *Engine) FreeBackend() {
 //	UseMmap         mmap the GGUF (true by default; false = full RAM copy)
 //	UseMlock        pin pages in RAM (guarantees no swap)
 //	TypeK/TypeV     KV cache quant: "" (f16 default), "q8_0", "q4_0", …
+//	MMProjPath      optional multimodal projector GGUF for image inputs
 type LoadOptions struct {
 	GPULayers     int
 	CtxSize       int
@@ -193,6 +195,8 @@ type LoadOptions struct {
 	UseMlock      bool
 	TypeK         string
 	TypeV         string
+	MMProjPath    string
+	MMProjUseGPU  bool
 }
 
 // DefaultLoadOptions returns the set of values we use when callers pass zero
@@ -207,6 +211,7 @@ func DefaultLoadOptions() LoadOptions {
 		OffloadKQV: true,
 		UseMmap:    true,
 		UseMlock:   false,
+		MMProjUseGPU: true,
 	}
 }
 
@@ -268,6 +273,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 		"use_mlock", opts.UseMlock,
 		"type_k", opts.TypeK,
 		"type_v", opts.TypeV,
+		"mmproj_path", opts.MMProjPath,
 	)
 
 	model, err := llamaModelLoad(path, ModelParams{
@@ -299,10 +305,19 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 		e.lastError = err.Error()
 		return fmt.Errorf("create context: %w", err)
 	}
+	mtmd, err := mtmdContextLoad(opts.MMProjPath, model, opts)
+	if err != nil {
+		ctx.Free()
+		model.Free()
+		e.state = StateError
+		e.lastError = err.Error()
+		return err
+	}
 
 	e.model = model
 	e.ctx = ctx
 	e.vocab = model.Vocab()
+	e.mtmd = mtmd
 	e.batchSize = opts.BatchSize
 	e.modelID = modelID
 	e.modelPath = path
@@ -336,6 +351,10 @@ func (e *Engine) unloadLocked() {
 	if e.sampler != nil {
 		e.sampler.Free()
 		e.sampler = nil
+	}
+	if e.mtmd != nil {
+		e.mtmd.Free()
+		e.mtmd = nil
 	}
 	if e.ctx != nil {
 		e.ctx.Free()

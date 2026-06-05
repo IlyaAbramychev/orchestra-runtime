@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -132,39 +133,33 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 		return nil, fmt.Errorf("engine not ready (state: %s)", e.state)
 	}
 
+	promptMessages := messages
+	var images [][]byte
+	if messagesHaveImages(messages) {
+		var err error
+		images, err = decodeMessageImages(messages)
+		if err != nil {
+			return nil, err
+		}
+		promptMessages = withMediaMarkers(messages)
+	}
+
 	var (
 		prompt string
 		err    error
 	)
-	if params.RawPrompt && len(messages) == 1 {
-		prompt = messages[0].Content
+	if params.RawPrompt && len(promptMessages) == 1 {
+		prompt = promptMessages[0].Content
 	} else {
-		prompt, err = e.buildPrompt(messages, params.ChatTemplate)
+		prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
 		if err != nil {
 			return nil, fmt.Errorf("build prompt: %w", err)
 		}
 	}
-
-	tokens := e.vocab.Tokenize(prompt, true, true)
-	if len(tokens) == 0 {
-		return nil, fmt.Errorf("tokenization produced no tokens")
-	}
-
-	nPrompt := len(tokens)
 	nCtx := e.ctx.NCtx()
 	maxTokens := params.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 512
-	}
-
-	// Guard: llama.cpp SIGSEGVs on batch decode when position >= n_ctx,
-	// which takes down the whole process. Refuse overflowing requests here.
-	if nPrompt >= nCtx {
-		return nil, NewContextLengthExceededError(nPrompt, nCtx, false, maxTokens)
-	}
-	// Leave 1 slot of headroom so we never hit pos == n_ctx during decode.
-	if room := nCtx - nPrompt - 1; maxTokens > room {
-		maxTokens = room
 	}
 
 	// Clear KV cache for stateless request (OpenAI-compatible semantics)
@@ -175,27 +170,21 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	prefillBatchSize := e.promptBatchSize()
 	batch := llamaBatchInit(prefillBatchSize, 1)
 	defer batch.Free()
-
-	for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		endIdx := startIdx + prefillBatchSize
-		if endIdx > len(tokens) {
-			endIdx = len(tokens)
-		}
-		batch.Clear()
-		for i := startIdx; i < endIdx; i++ {
-			logits := i == len(tokens)-1
-			if err := batch.Add(tokens[i], i, 0, logits); err != nil {
-				return nil, err
-			}
-		}
-		if err := llamaDecode(e.ctx, batch); err != nil {
-			return nil, fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)
-		}
+	nPrompt, sampleIdx, err := e.prefillPrompt(ctx, batch, prompt, images)
+	if err != nil {
+		return nil, err
 	}
 	promptEvalNs := time.Since(promptStart).Nanoseconds()
+
+	// Guard: llama.cpp SIGSEGVs on batch decode when position >= n_ctx,
+	// which takes down the whole process. Refuse overflowing requests here.
+	if nPrompt >= nCtx {
+		return nil, NewContextLengthExceededError(nPrompt, nCtx, false, maxTokens)
+	}
+	// Leave 1 slot of headroom so we never hit pos == n_ctx during decode.
+	if room := nCtx - nPrompt - 1; maxTokens > room {
+		maxTokens = room
+	}
 
 	// Create sampler
 	sampler, err := e.createSampler(params)
@@ -217,7 +206,7 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 			break
 		}
 
-		token := sampler.Sample(e.ctx, batch.NTokens()-1)
+		token := sampler.Sample(e.ctx, sampleIdx)
 		sampler.Accept(token)
 
 		// Check for end of generation
@@ -247,6 +236,7 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 		if err := llamaDecode(e.ctx, batch); err != nil {
 			return nil, fmt.Errorf("decode token %d: %w", nGen, err)
 		}
+		sampleIdx = batch.NTokens() - 1
 	}
 
 	return &CompletionResult{
@@ -275,39 +265,33 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		return nil, fmt.Errorf("engine not ready (state: %s)", e.state)
 	}
 
+	promptMessages := messages
+	var images [][]byte
 	var (
 		prompt string
 		err    error
 	)
-	if params.RawPrompt && len(messages) == 1 {
-		prompt = messages[0].Content
+	if messagesHaveImages(messages) {
+		images, err = decodeMessageImages(messages)
+		if err != nil {
+			e.mu.Unlock()
+			return nil, err
+		}
+		promptMessages = withMediaMarkers(messages)
+	}
+	if params.RawPrompt && len(promptMessages) == 1 {
+		prompt = promptMessages[0].Content
 	} else {
-		prompt, err = e.buildPrompt(messages, params.ChatTemplate)
+		prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
 		if err != nil {
 			e.mu.Unlock()
 			return nil, fmt.Errorf("build prompt: %w", err)
 		}
 	}
-
-	tokens := e.vocab.Tokenize(prompt, true, true)
-	if len(tokens) == 0 {
-		e.mu.Unlock()
-		return nil, fmt.Errorf("tokenization produced no tokens")
-	}
-
-	nPrompt := len(tokens)
 	nCtx := e.ctx.NCtx()
 	maxTokens := params.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 512
-	}
-
-	// Guard: llama.cpp SIGSEGVs on batch decode when position ≥ n_ctx, which
-	// kills the whole process (seen as "terminated" on the HTTP side). Reject
-	// before handing tokens to the C side.
-	if nPrompt >= nCtx {
-		e.mu.Unlock()
-		return nil, NewContextLengthExceededError(nPrompt, nCtx, true, maxTokens)
 	}
 
 	ch := make(chan CompletionChunk, 32)
@@ -328,11 +312,6 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 			}
 		}()
 
-		// Leave 1 slot so we never hit pos == n_ctx during sampling.
-		if room := nCtx - nPrompt - 1; maxTokens > room {
-			maxTokens = room
-		}
-
 		// Clear KV cache for stateless request (OpenAI-compatible semantics)
 		e.ctx.ClearKVCache()
 
@@ -341,30 +320,23 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		prefillBatchSize := e.promptBatchSize()
 		batch := llamaBatchInit(prefillBatchSize, 1)
 		defer batch.Free()
-
-		for startIdx := 0; startIdx < len(tokens); startIdx += prefillBatchSize {
-			if err := ctx.Err(); err != nil {
-				ch <- CompletionChunk{Err: err}
-				return
-			}
-			endIdx := startIdx + prefillBatchSize
-			if endIdx > len(tokens) {
-				endIdx = len(tokens)
-			}
-			batch.Clear()
-			for i := startIdx; i < endIdx; i++ {
-				logits := i == len(tokens)-1
-				if err := batch.Add(tokens[i], i, 0, logits); err != nil {
-					ch <- CompletionChunk{Err: err}
-					return
-				}
-			}
-			if err := llamaDecode(e.ctx, batch); err != nil {
-				ch <- CompletionChunk{Err: fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)}
-				return
-			}
+		nPrompt, sampleIdx, err := e.prefillPrompt(ctx, batch, prompt, images)
+		if err != nil {
+			ch <- CompletionChunk{Err: err}
+			return
 		}
 		promptEvalNs := time.Since(promptStart).Nanoseconds()
+
+		// Guard: llama.cpp SIGSEGVs on batch decode when position >= n_ctx,
+		// which kills the whole process (seen as "terminated" on the HTTP side).
+		if nPrompt >= nCtx {
+			ch <- CompletionChunk{Err: NewContextLengthExceededError(nPrompt, nCtx, true, maxTokens)}
+			return
+		}
+		// Leave 1 slot so we never hit pos == n_ctx during sampling.
+		if room := nCtx - nPrompt - 1; maxTokens > room {
+			maxTokens = room
+		}
 
 		sampler, err := e.createSampler(params)
 		if err != nil {
@@ -408,7 +380,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 				return
 			}
 
-			token := sampler.Sample(e.ctx, batch.NTokens()-1)
+			token := sampler.Sample(e.ctx, sampleIdx)
 			sampler.Accept(token)
 
 			if e.vocab.IsEOG(token) {
@@ -453,6 +425,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 				ch <- CompletionChunk{Err: fmt.Errorf("decode token %d: %w", nGen, err)}
 				return
 			}
+			sampleIdx = batch.NTokens() - 1
 		}
 
 		// Hit max_tokens — flush any pending UTF-8 tail before finishing
@@ -476,6 +449,112 @@ func (e *Engine) promptBatchSize() int {
 		return e.batchSize
 	}
 	return 512
+}
+
+func (e *Engine) prefillPrompt(ctx context.Context, batch *llamaBatch, prompt string, images [][]byte) (int, int, error) {
+	if len(images) > 0 {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		nPast, err := mtmdEvalPrompt(e.mtmd, e.ctx, prompt, images, e.promptBatchSize())
+		if err != nil {
+			return 0, 0, err
+		}
+		batch.Clear()
+		return nPast, -1, nil
+	}
+
+	tokens := e.vocab.Tokenize(prompt, true, true)
+	if len(tokens) == 0 {
+		return 0, 0, fmt.Errorf("tokenization produced no tokens")
+	}
+	for startIdx := 0; startIdx < len(tokens); startIdx += e.promptBatchSize() {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		endIdx := startIdx + e.promptBatchSize()
+		if endIdx > len(tokens) {
+			endIdx = len(tokens)
+		}
+		batch.Clear()
+		for i := startIdx; i < endIdx; i++ {
+			logits := i == len(tokens)-1
+			if err := batch.Add(tokens[i], i, 0, logits); err != nil {
+				return 0, 0, err
+			}
+		}
+		if err := llamaDecode(e.ctx, batch); err != nil {
+			return 0, 0, fmt.Errorf("decode prompt chunk %d-%d: %w", startIdx, endIdx, err)
+		}
+	}
+	return len(tokens), batch.NTokens() - 1, nil
+}
+
+func messagesHaveImages(messages []ChatMessage) bool {
+	for _, msg := range messages {
+		if len(msg.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func withMediaMarkers(messages []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, len(messages))
+	marker := mtmdDefaultMarker()
+	for i, msg := range messages {
+		out[i] = msg
+		if len(msg.Images) == 0 {
+			continue
+		}
+		var builder strings.Builder
+		for idx := range msg.Images {
+			if idx > 0 {
+				builder.WriteByte('\n')
+			}
+			builder.WriteString(marker)
+		}
+		if msg.Content != "" {
+			builder.WriteByte('\n')
+			builder.WriteString(msg.Content)
+		}
+		out[i].Content = builder.String()
+		out[i].Images = nil
+	}
+	return out
+}
+
+func decodeMessageImages(messages []ChatMessage) ([][]byte, error) {
+	var out [][]byte
+	for _, msg := range messages {
+		for idx, raw := range msg.Images {
+			img, err := decodeImageBase64(raw)
+			if err != nil {
+				return nil, fmt.Errorf("decode image %d: %w", idx, err)
+			}
+			out = append(out, img)
+		}
+	}
+	return out, nil
+}
+
+func decodeImageBase64(raw string) ([]byte, error) {
+	encoded := strings.TrimSpace(raw)
+	if encoded == "" {
+		return nil, fmt.Errorf("empty image payload")
+	}
+	if comma := strings.Index(encoded, ","); comma > 0 && strings.HasPrefix(encoded[:comma], "data:") {
+		encoded = encoded[comma+1:]
+	}
+	img, err := base64.StdEncoding.DecodeString(encoded)
+	if err == nil {
+		return img, nil
+	}
+	img, rawErr := base64.RawStdEncoding.DecodeString(encoded)
+	if rawErr == nil {
+		return img, nil
+	}
+	return nil, fmt.Errorf("invalid base64 image: %w", err)
 }
 
 // buildPrompt applies the chat template to convert messages into a prompt string.

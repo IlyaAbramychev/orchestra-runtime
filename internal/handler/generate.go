@@ -16,11 +16,16 @@ import (
 // GenerateHandler serves Ollama's /api/generate. Same engine as chat, but
 // the prompt is raw (no chat template) unless `system` is provided.
 type GenerateHandler struct {
-	inference *service.InferenceService
+	inference         *service.InferenceService
+	multimodalEnabled bool
 }
 
 func NewGenerateHandler(inf *service.InferenceService) *GenerateHandler {
 	return &GenerateHandler{inference: inf}
+}
+
+func (h *GenerateHandler) SetMultimodalEnabled(enabled bool) {
+	h.multimodalEnabled = enabled
 }
 
 // Generate handles POST /api/generate.
@@ -34,7 +39,7 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
-	if err := validateGenerateRequest(&req); err != nil {
+	if err := validateGenerateRequest(&req, h.multimodalEnabled); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -101,7 +106,7 @@ func (h *GenerateHandler) handleCompletion(
 	prompt string,
 	params engine.CompletionParams,
 ) {
-	result, err := h.inference.Generate(r.Context(), req.Model, prompt, "", params)
+	result, err := h.inference.Generate(r.Context(), req.Model, prompt, "", nil, params)
 	if err != nil {
 		slog.Error("completion failed", "error", err)
 		writeRuntimeError(w, err)
@@ -145,7 +150,7 @@ func (h *GenerateHandler) handleCompletionStream(
 		return
 	}
 
-	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, "", params)
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, "", nil, params)
 	if err != nil {
 		slog.Error("completion stream failed", "error", err)
 		writeRuntimeError(w, err)
@@ -207,7 +212,7 @@ func (h *GenerateHandler) handleComplete(
 	} else if ok {
 		system = appendInstruction(system, instruction)
 	}
-	result, err := h.inference.Generate(r.Context(), req.Model, prompt, system, params)
+	result, err := h.inference.Generate(r.Context(), req.Model, prompt, system, req.Images, params)
 	if err != nil {
 		slog.Error("generate failed", "error", err)
 		writeRuntimeError(w, err)
@@ -245,7 +250,7 @@ func (h *GenerateHandler) handleStream(
 		return
 	}
 
-	ch, err := h.inference.GenerateStream(r.Context(), req.Model, req.Prompt, req.System, params)
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, req.Prompt, req.System, req.Images, params)
 	if err != nil {
 		slog.Error("generate stream failed", "error", err)
 		writeRuntimeError(w, err)
@@ -315,7 +320,7 @@ func (h *GenerateHandler) handleBufferedStream(
 		system = appendInstruction(system, instruction)
 	}
 
-	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, system, params)
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, system, req.Images, params)
 	if err != nil {
 		slog.Error("generate buffered stream failed", "error", err)
 		writeRuntimeError(w, err)
@@ -438,7 +443,7 @@ func toEngineParamsFromGenerate(req *model.GenerateRequest) engine.CompletionPar
 	return p
 }
 
-func validateGenerateRequest(req *model.GenerateRequest) error {
+func validateGenerateRequest(req *model.GenerateRequest, multimodalEnabled bool) error {
 	if req.Template != "" {
 		return fmt.Errorf("template is not supported yet")
 	}
@@ -449,7 +454,9 @@ func validateGenerateRequest(req *model.GenerateRequest) error {
 		return fmt.Errorf("suffix is not supported yet")
 	}
 	if len(req.Images) > 0 {
-		return fmt.Errorf("multimodal images are not supported yet")
+		if !multimodalEnabled {
+			return fmt.Errorf("multimodal images require ORCHESTRA_MMPROJ_PATH")
+		}
 	}
 	return nil
 }

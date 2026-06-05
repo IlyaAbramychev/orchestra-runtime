@@ -114,6 +114,8 @@ func (r *Remote) LoadModel(modelID, path string, opts engine.LoadOptions) error 
 		UseMlock:      opts.UseMlock,
 		TypeK:         opts.TypeK,
 		TypeV:         opts.TypeV,
+		MMProjPath:    opts.MMProjPath,
+		MMProjUseGPU:  opts.MMProjUseGPU,
 	})
 	if err != nil {
 		r.state.Store(engine.StateError)
@@ -393,7 +395,7 @@ func (r *Remote) MarkUsed() {}
 func toRPCMessages(in []engine.ChatMessage) []rpc.ChatMessage {
 	out := make([]rpc.ChatMessage, len(in))
 	for i, m := range in {
-		out[i] = rpc.ChatMessage{Role: m.Role, Content: m.Content}
+		out[i] = rpc.ChatMessage{Role: m.Role, Content: m.Content, Images: append([]string(nil), m.Images...)}
 	}
 	return out
 }

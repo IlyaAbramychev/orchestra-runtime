@@ -190,6 +190,8 @@ func (w *worker) dispatch(ctx context.Context, c *rpc.Codec, env *rpc.Envelope) 
 			UseMlock:      p.UseMlock,
 			TypeK:         p.TypeK,
 			TypeV:         p.TypeV,
+			MMProjPath:    p.MMProjPath,
+			MMProjUseGPU:  p.MMProjUseGPU,
 		}
 		if err := w.engine.LoadModel(p.ModelID, p.Path, opts); err != nil {
 			_ = c.Write(finalErr(env.ID, rpc.ErrCodeLoadFailed, err.Error()))
@@ -382,7 +384,7 @@ func finalErr(id, code, msg string) *rpc.Envelope {
 func toEngineMessages(in []rpc.ChatMessage) []engine.ChatMessage {
 	out := make([]engine.ChatMessage, len(in))
 	for i, m := range in {
-		out[i] = engine.ChatMessage{Role: m.Role, Content: m.Content}
+		out[i] = engine.ChatMessage{Role: m.Role, Content: m.Content, Images: append([]string(nil), m.Images...)}
 	}
 	return out
 }

@@ -71,7 +71,7 @@ func TestCapabilitiesReportsFeatureSupport(t *testing.T) {
 	if features["tool_calls_non_streaming"] != "supported" {
 		t.Fatalf("tool_calls_non_streaming = %q", features["tool_calls_non_streaming"])
 	}
-	if features["multimodal_images"] != "unsupported" {
+	if features["multimodal_images"] != "partial" {
 		t.Fatalf("multimodal_images = %q", features["multimodal_images"])
 	}
 	if features["direct_gguf_pull"] != "extension" {

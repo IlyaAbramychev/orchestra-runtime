@@ -22,7 +22,9 @@ type Config struct {
 	LogLevel         string
 	// IdleTimeout: auto-unload the model after this duration without use.
 	// Zero disables the watcher. Inspired by Ollama's OLLAMA_KEEP_ALIVE.
-	IdleTimeout time.Duration
+	IdleTimeout  time.Duration
+	MMProjPath   string
+	MMProjUseGPU bool
 }
 
 func Load() *Config {
@@ -51,7 +53,9 @@ func Load() *Config {
 		LogLevel:         getEnv("LOG_LEVEL", "info"),
 		// 10 min default — same as Ollama's default KEEP_ALIVE.
 		// Set ORCHESTRA_IDLE_TIMEOUT_SECONDS=0 to disable.
-		IdleTimeout: time.Duration(getEnvInt("ORCHESTRA_IDLE_TIMEOUT_SECONDS", 600)) * time.Second,
+		IdleTimeout:  time.Duration(getEnvInt("ORCHESTRA_IDLE_TIMEOUT_SECONDS", 600)) * time.Second,
+		MMProjPath:   getEnv("ORCHESTRA_MMPROJ_PATH", ""),
+		MMProjUseGPU: getEnvBool("ORCHESTRA_MMPROJ_USE_GPU", true),
 	}
 }
 
@@ -66,6 +70,18 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := asciiLower(os.Getenv(key)); v != "" {
+		switch v {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
 		}
 	}
 	return fallback
@@ -119,4 +135,14 @@ func trimSpace(s string) string {
 		end--
 	}
 	return s[start:end]
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
 }

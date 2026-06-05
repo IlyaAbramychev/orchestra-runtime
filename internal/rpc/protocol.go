@@ -212,6 +212,8 @@ type LoadParams struct {
 	UseMlock      bool    `json:"use_mlock,omitempty"`
 	TypeK         string  `json:"type_k,omitempty"`
 	TypeV         string  `json:"type_v,omitempty"`
+	MMProjPath    string  `json:"mmproj_path,omitempty"`
+	MMProjUseGPU  bool    `json:"mmproj_use_gpu,omitempty"`
 }
 
 type StatusResult struct {
@@ -229,8 +231,9 @@ type StatusResult struct {
 // ChatMessage mirrors engine.ChatMessage but lives here so the rpc package
 // doesn't import engine (which pulls in CGo on the host side).
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
 }
 
 type CompletionParams struct {
