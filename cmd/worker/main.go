@@ -154,10 +154,20 @@ func (w *worker) dispatch(ctx context.Context, c *rpc.Codec, env *rpc.Envelope) 
 		_ = c.Write(finalOK(env.ID, map[string]any{"pong": true}))
 
 	case rpc.MethodStatus:
+		opts := w.engine.LoadedOptions()
+		loadedAt := ""
+		if at := w.engine.LoadedAt(); !at.IsZero() {
+			loadedAt = at.UTC().Format(time.RFC3339)
+		}
 		_ = c.Write(finalOK(env.ID, rpc.StatusResult{
 			State:         w.engine.State(),
 			ModelID:       w.engine.LoadedModelID(),
 			IsLoaded:      w.engine.IsLoaded(),
+			ContextSize:   w.engine.LoadedContextSize(),
+			GPULayers:     opts.GPULayers,
+			Threads:       opts.Threads,
+			LoadedAt:      loadedAt,
+			Error:         w.engine.LastError(),
 			IdleTimeoutNs: int64(w.engine.IdleTimeout()),
 		}))
 

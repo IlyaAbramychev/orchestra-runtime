@@ -182,6 +182,7 @@ func (s *Server) buildRouter(
 		// System info
 		r.Get("/api/health", systemH.Health)
 		r.Get("/api/system", systemH.Info)
+		r.Get("/api/status", systemH.Status)
 
 		// Admin / operational
 		r.Get("/api/logs", adminH.Logs)

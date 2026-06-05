@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -195,14 +194,23 @@ func TestOpenAIChatStreamContextLengthErrorReturnsBadRequest(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
+	var resp struct {
+		Error struct {
+			Code            string `json:"code"`
+			Message         string `json:"message"`
+			PromptTokens    int    `json:"promptTokens"`
+			ContextSize     int    `json:"contextSize"`
+			MaxOutputTokens int    `json:"maxOutputTokens"`
+			OverflowTokens  int    `json:"overflowTokens"`
+		} `json:"error"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp["code"] != engine.ContextLengthExceededCode || resp["type"] != engine.ContextLengthExceededCode {
+	if resp.Error.Code != engine.ContextLengthExceededCode {
 		t.Fatalf("unexpected error payload: %+v", resp)
 	}
-	if !strings.Contains(resp["error"], "32801 tokens") || !strings.Contains(resp["error"], "12032") {
+	if resp.Error.PromptTokens != 32801 || resp.Error.ContextSize != 12032 {
 		t.Fatalf("unexpected error message: %+v", resp)
 	}
 }

@@ -19,6 +19,9 @@ type Engine struct {
 
 	modelID   string
 	modelPath string
+	loadOpts  LoadOptions
+	loadedAt  time.Time
+	lastError string
 	state     string // idle, loading, ready, error
 
 	// Idle auto-unload (inspired by Ollama's OLLAMA_KEEP_ALIVE):
@@ -253,6 +256,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	e.unloadLocked()
 
 	e.state = StateLoading
+	e.lastError = ""
 	slog.Info("loading model",
 		"path", path,
 		"gpu_layers", opts.GPULayers,
@@ -273,6 +277,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	})
 	if err != nil {
 		e.state = StateError
+		e.lastError = err.Error()
 		return fmt.Errorf("load model: %w", err)
 	}
 
@@ -291,6 +296,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	if err != nil {
 		model.Free()
 		e.state = StateError
+		e.lastError = err.Error()
 		return fmt.Errorf("create context: %w", err)
 	}
 
@@ -300,6 +306,9 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	e.batchSize = opts.BatchSize
 	e.modelID = modelID
 	e.modelPath = path
+	e.loadOpts = opts
+	e.loadedAt = time.Now().UTC()
+	e.lastError = ""
 	e.state = StateReady
 	e.markUsedLocked()
 
@@ -340,6 +349,8 @@ func (e *Engine) unloadLocked() {
 	e.batchSize = 0
 	e.modelID = ""
 	e.modelPath = ""
+	e.loadOpts = LoadOptions{}
+	e.loadedAt = time.Time{}
 	e.state = StateIdle
 }
 
@@ -362,6 +373,36 @@ func (e *Engine) LoadedModelID() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.modelID
+}
+
+// LoadedContextSize returns the effective llama.cpp context window for the
+// currently loaded model. It can differ from the requested n_ctx because
+// llama.cpp may round or clamp context parameters during context creation.
+func (e *Engine) LoadedContextSize() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.ctx == nil {
+		return 0
+	}
+	return e.ctx.NCtx()
+}
+
+func (e *Engine) LoadedOptions() LoadOptions {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.loadOpts
+}
+
+func (e *Engine) LoadedAt() time.Time {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.loadedAt
+}
+
+func (e *Engine) LastError() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastError
 }
 
 // ModelDesc returns the description of the loaded model.

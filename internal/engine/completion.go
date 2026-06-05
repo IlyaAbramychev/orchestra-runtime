@@ -150,16 +150,15 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 
 	nPrompt := len(tokens)
 	nCtx := e.ctx.NCtx()
+	maxTokens := params.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 512
+	}
 
 	// Guard: llama.cpp SIGSEGVs on batch decode when position >= n_ctx,
 	// which takes down the whole process. Refuse overflowing requests here.
 	if nPrompt >= nCtx {
-		return nil, NewContextLengthExceededError(nPrompt, nCtx, false)
-	}
-
-	maxTokens := params.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 512
+		return nil, NewContextLengthExceededError(nPrompt, nCtx, false, maxTokens)
 	}
 	// Leave 1 slot of headroom so we never hit pos == n_ctx during decode.
 	if room := nCtx - nPrompt - 1; maxTokens > room {
@@ -293,13 +292,17 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 
 	nPrompt := len(tokens)
 	nCtx := e.ctx.NCtx()
+	maxTokens := params.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 512
+	}
 
 	// Guard: llama.cpp SIGSEGVs on batch decode when position ≥ n_ctx, which
 	// kills the whole process (seen as "terminated" on the HTTP side). Reject
 	// before handing tokens to the C side.
 	if nPrompt >= nCtx {
 		e.mu.Unlock()
-		return nil, NewContextLengthExceededError(nPrompt, nCtx, true)
+		return nil, NewContextLengthExceededError(nPrompt, nCtx, true, maxTokens)
 	}
 
 	ch := make(chan CompletionChunk, 32)
@@ -320,10 +323,6 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 			}
 		}()
 
-		maxTokens := params.MaxTokens
-		if maxTokens <= 0 {
-			maxTokens = 512
-		}
 		// Leave 1 slot so we never hit pos == n_ctx during sampling.
 		if room := nCtx - nPrompt - 1; maxTokens > room {
 			maxTokens = room

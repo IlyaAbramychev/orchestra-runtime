@@ -14,9 +14,21 @@ type SystemInfoResponse struct {
 	GPU            *GPUInfo `json:"gpu,omitempty"`
 	EngineState    string   `json:"engine_state"`
 	CurrentModel   *string  `json:"current_model,omitempty"`
+	ContextSize    int      `json:"context_size,omitempty"`
 	QueueDepth     int      `json:"queue_depth"`
 	// IdleTimeoutSeconds: auto-unload timer in seconds (0 = disabled).
 	IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+}
+
+type RuntimeStatusResponse struct {
+	State           string  `json:"state"`
+	Model           *string `json:"model"`
+	ContextSize     *int    `json:"contextSize"`
+	MaxOutputTokens int     `json:"maxOutputTokens"`
+	GPULayers       int     `json:"gpuLayers"`
+	Threads         int     `json:"threads"`
+	LoadedAt        *string `json:"loadedAt"`
+	Error           *string `json:"error"`
 }
 
 type GPUInfo struct {

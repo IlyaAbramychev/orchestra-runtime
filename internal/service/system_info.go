@@ -12,6 +12,22 @@ import (
 	"github.com/operium/orchestra-runtime/internal/model"
 )
 
+type loadedContextSizer interface {
+	LoadedContextSize() int
+}
+
+type loadedOptionsReporter interface {
+	LoadedOptions() engine.LoadOptions
+}
+
+type loadedAtReporter interface {
+	LoadedAt() time.Time
+}
+
+type lastErrorReporter interface {
+	LastError() string
+}
+
 // Version is the runtime's advertised build version, surfaced via /api/system.
 // It is set at process start from the `main.version` variable in cmd/server,
 // which the Makefile populates via `-ldflags="-X main.version=$(VERSION)"`.
@@ -100,8 +116,66 @@ func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 	if currentModelID != "" {
 		info.CurrentModel = &currentModelID
 	}
+	if sized, ok := s.engine.(loadedContextSizer); ok {
+		info.ContextSize = sized.LoadedContextSize()
+	}
 
 	return info
+}
+
+func (s *SystemInfo) GetStatus() *model.RuntimeStatusResponse {
+	engineState := s.engine.State()
+	currentModelID := s.engine.LoadedModelID()
+	if s.scheduler != nil {
+		snapshot := s.scheduler.Snapshot()
+		engineState = snapshot.State
+		if snapshot.ActiveModelID != "" {
+			currentModelID = snapshot.ActiveModelID
+		}
+	}
+
+	var modelID *string
+	if currentModelID != "" {
+		modelID = &currentModelID
+	}
+
+	var contextSize *int
+	if sized, ok := s.engine.(loadedContextSizer); ok {
+		if size := sized.LoadedContextSize(); size > 0 {
+			contextSize = &size
+		}
+	}
+
+	opts := engine.LoadOptions{}
+	if reporter, ok := s.engine.(loadedOptionsReporter); ok {
+		opts = reporter.LoadedOptions()
+	}
+
+	var loadedAt *string
+	if reporter, ok := s.engine.(loadedAtReporter); ok {
+		if at := reporter.LoadedAt(); !at.IsZero() {
+			formatted := at.UTC().Format(time.RFC3339)
+			loadedAt = &formatted
+		}
+	}
+
+	var errorText *string
+	if reporter, ok := s.engine.(lastErrorReporter); ok {
+		if msg := reporter.LastError(); msg != "" {
+			errorText = &msg
+		}
+	}
+
+	return &model.RuntimeStatusResponse{
+		State:           engineState,
+		Model:           modelID,
+		ContextSize:     contextSize,
+		MaxOutputTokens: engine.DefaultCompletionParams().MaxTokens,
+		GPULayers:       opts.GPULayers,
+		Threads:         opts.Threads,
+		LoadedAt:        loadedAt,
+		Error:           errorText,
+	}
 }
 
 // --- Platform-specific hardware detection ---

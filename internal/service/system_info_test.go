@@ -40,6 +40,63 @@ func TestSystemInfoIncludesBuildMetadata(t *testing.T) {
 	}
 }
 
+func (b *autoLoadBackend) LoadedContextSize() int {
+	if b.loadedID == "" {
+		return 0
+	}
+	return b.lastOpts.CtxSize
+}
+
+func (b *autoLoadBackend) LoadedOptions() engine.LoadOptions {
+	return b.lastOpts
+}
+
+func (b *autoLoadBackend) LoadedAt() time.Time {
+	if b.loadedID == "" {
+		return time.Time{}
+	}
+	return time.Date(2026, 5, 15, 9, 0, 0, 0, time.UTC)
+}
+
+func (b *autoLoadBackend) LastError() string {
+	return ""
+}
+
+func TestSystemStatusReportsActualLoadedContext(t *testing.T) {
+	backend := &autoLoadBackend{}
+	opts := engine.DefaultLoadOptions()
+	opts.CtxSize = 12032
+	opts.GPULayers = -1
+	opts.Threads = 8
+	if err := backend.LoadModel("model-1", "/tmp/model.gguf", opts); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	status := NewSystemInfo(backend).GetStatus()
+	if status.Model == nil || *status.Model != "model-1" {
+		t.Fatalf("model = %#v", status.Model)
+	}
+	if status.ContextSize == nil || *status.ContextSize != 12032 {
+		t.Fatalf("context size = %#v", status.ContextSize)
+	}
+	if status.GPULayers != -1 || status.Threads != 8 {
+		t.Fatalf("load params = gpu %d threads %d", status.GPULayers, status.Threads)
+	}
+	if status.LoadedAt == nil {
+		t.Fatal("expected loadedAt")
+	}
+}
+
+func TestSystemStatusReportsNullContextWhenUnloaded(t *testing.T) {
+	status := NewSystemInfo(&autoLoadBackend{}).GetStatus()
+	if status.Model != nil {
+		t.Fatalf("model = %#v", status.Model)
+	}
+	if status.ContextSize != nil {
+		t.Fatalf("context size = %#v", status.ContextSize)
+	}
+}
+
 func TestSystemInfoUsesActiveSchedulerModelDuringLoad(t *testing.T) {
 	backend := &fakeBackend{
 		loadStart: make(chan struct{}, 1),

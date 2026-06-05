@@ -23,12 +23,28 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func writeRuntimeError(w http.ResponseWriter, err error) {
-	payload := map[string]string{"error": err.Error()}
-	if code := runtimeErrorCode(err); code != "" {
-		payload["code"] = code
-		payload["type"] = code
+	writeJSON(w, runtimeHTTPStatus(err), map[string]any{
+		"error": runtimeErrorPayload(err),
+	})
+}
+
+func runtimeErrorPayload(err error) map[string]any {
+	payload := map[string]any{
+		"code":    runtimeErrorCode(err),
+		"message": err.Error(),
 	}
-	writeJSON(w, runtimeHTTPStatus(err), payload)
+	if payload["code"] == "" {
+		payload["code"] = "runtime_error"
+	}
+	var contextLength *engine.ContextLengthExceededError
+	if errors.As(err, &contextLength) {
+		payload["message"] = "Prompt exceeds model context window."
+		payload["promptTokens"] = contextLength.PromptTokens
+		payload["contextSize"] = contextLength.ContextSize
+		payload["maxOutputTokens"] = contextLength.MaxOutputTokens
+		payload["overflowTokens"] = contextLength.OverflowTokens()
+	}
+	return payload
 }
 
 func runtimeHTTPStatus(err error) int {

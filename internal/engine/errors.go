@@ -5,16 +5,22 @@ import "fmt"
 const ContextLengthExceededCode = "context_length_exceeded"
 
 type ContextLengthExceededError struct {
-	PromptTokens int
-	ContextSize  int
-	ReloadHint   bool
+	PromptTokens    int
+	ContextSize     int
+	MaxOutputTokens int
+	ReloadHint      bool
 }
 
-func NewContextLengthExceededError(promptTokens, contextSize int, reloadHint bool) *ContextLengthExceededError {
+func NewContextLengthExceededError(promptTokens, contextSize int, reloadHint bool, maxOutputTokens ...int) *ContextLengthExceededError {
+	maxTokens := 0
+	if len(maxOutputTokens) > 0 {
+		maxTokens = maxOutputTokens[0]
+	}
 	return &ContextLengthExceededError{
-		PromptTokens: promptTokens,
-		ContextSize:  contextSize,
-		ReloadHint:   reloadHint,
+		PromptTokens:    promptTokens,
+		ContextSize:     contextSize,
+		MaxOutputTokens: maxTokens,
+		ReloadHint:      reloadHint,
 	}
 }
 
@@ -33,4 +39,15 @@ func (e *ContextLengthExceededError) Error() string {
 
 func (e *ContextLengthExceededError) Code() string {
 	return ContextLengthExceededCode
+}
+
+func (e *ContextLengthExceededError) OverflowTokens() int {
+	overflow := e.PromptTokens - e.ContextSize
+	if e.MaxOutputTokens > 0 {
+		overflow += e.MaxOutputTokens
+	}
+	if overflow < 0 {
+		return 0
+	}
+	return overflow
 }

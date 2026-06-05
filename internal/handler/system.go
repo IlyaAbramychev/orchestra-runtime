@@ -37,3 +37,9 @@ func (h *SystemHandler) Info(w http.ResponseWriter, r *http.Request) {
 	info := h.sysInfo.GetInfo(queueDepth)
 	writeJSON(w, http.StatusOK, info)
 }
+
+// Status handles GET /api/status. It is a compact, read-only runtime state
+// endpoint intended for clients that need the actual loaded model limits.
+func (h *SystemHandler) Status(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.sysInfo.GetStatus())
+}

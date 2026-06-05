@@ -32,6 +32,7 @@ go.work.sum
 # ── IDE / OS ───────────────────────────────────────────────────────────────
 .DS_Store
 .idea/
+.orchestra/
 *.swp
 *.swo
 .vscode/settings.json

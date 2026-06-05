@@ -34,21 +34,21 @@ const (
 	MethodEmbed          = "embed"
 	MethodSetIdleTimeout = "set_idle_timeout"
 	MethodApplyKeepAlive = "apply_keep_alive"
-	MethodCancel         = "cancel"  // cancels another request by id
+	MethodCancel         = "cancel"   // cancels another request by id
 	MethodShutdown       = "shutdown" // graceful worker exit
 )
 
 // ── Error codes ──────────────────────────────────────────────────────────────
 
 const (
-	ErrCodeNotReady      = "not_ready"
-	ErrCodeInvalid       = "invalid_request"
-	ErrCodeLoadFailed    = "load_failed"
-	ErrCodeInference     = "inference_failed"
-	ErrCodeContextFull   = "context_overflow"
-	ErrCodeCancelled     = "cancelled"
-	ErrCodeUnsupported   = "unsupported_method"
-	ErrCodeInternal      = "internal"
+	ErrCodeNotReady    = "not_ready"
+	ErrCodeInvalid     = "invalid_request"
+	ErrCodeLoadFailed  = "load_failed"
+	ErrCodeInference   = "inference_failed"
+	ErrCodeContextFull = "context_overflow"
+	ErrCodeCancelled   = "cancelled"
+	ErrCodeUnsupported = "unsupported_method"
+	ErrCodeInternal    = "internal"
 )
 
 // ErrWorkerCrashed is returned on the host side when the worker subprocess
@@ -67,15 +67,15 @@ var ErrWorkerCrashed = errors.New("worker process crashed")
 //
 // Streaming:
 //
-//	 ── {id:X, kind:request, method:complete_stream} ──→
-//	                                  ←── {id:X, kind:chunk, result:{...}}
-//	                                  ←── {id:X, kind:chunk, result:{...}}
-//	                                  ←── {id:X, kind:final, result:{...}}
+//	── {id:X, kind:request, method:complete_stream} ──→
+//	                                 ←── {id:X, kind:chunk, result:{...}}
+//	                                 ←── {id:X, kind:chunk, result:{...}}
+//	                                 ←── {id:X, kind:final, result:{...}}
 //
 // Cancellation:
 //
-//	 ── {id:Y, kind:request, method:cancel, params:{target:X}} ──→
-//	 (worker stops pushing chunks for X and sends a final chunk for X)
+//	── {id:Y, kind:request, method:cancel, params:{target:X}} ──→
+//	(worker stops pushing chunks for X and sends a final chunk for X)
 type Kind string
 
 const (
@@ -218,6 +218,11 @@ type StatusResult struct {
 	State         string `json:"state"`
 	ModelID       string `json:"model_id,omitempty"`
 	IsLoaded      bool   `json:"is_loaded"`
+	ContextSize   int    `json:"context_size,omitempty"`
+	GPULayers     int    `json:"gpu_layers,omitempty"`
+	Threads       int    `json:"threads,omitempty"`
+	LoadedAt      string `json:"loaded_at,omitempty"`
+	Error         string `json:"error,omitempty"`
 	IdleTimeoutNs int64  `json:"idle_timeout_ns"`
 }
 

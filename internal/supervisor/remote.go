@@ -31,6 +31,11 @@ type Remote struct {
 	modelID     atomic.Value // string
 	loaded      atomic.Bool
 	state       atomic.Value // string
+	contextSize atomic.Int64
+	gpuLayers   atomic.Int64
+	threads     atomic.Int64
+	loadedAt    atomic.Value // string
+	lastError   atomic.Value // string
 	idleTimeout atomic.Int64 // ns
 	lastStatus  atomic.Int64 // unix ns
 }
@@ -40,15 +45,23 @@ type Remote struct {
 func NewRemote(w *Worker) *Remote {
 	r := &Remote{worker: w}
 	r.modelID.Store("")
+	r.loadedAt.Store("")
+	r.lastError.Store("")
 	r.state.Store(engine.StateIdle)
 	// When the worker exits (crash or graceful), flip local state to "idle"
 	// so callers can re-LoadModel and it will auto-respawn.
 	w.OnExit(func(err error) {
 		r.loaded.Store(false)
 		r.modelID.Store("")
+		r.contextSize.Store(0)
+		r.gpuLayers.Store(0)
+		r.threads.Store(0)
+		r.loadedAt.Store("")
 		if err != nil {
+			r.lastError.Store(err.Error())
 			r.state.Store(engine.StateError)
 		} else {
+			r.lastError.Store("")
 			r.state.Store(engine.StateIdle)
 		}
 	})
@@ -108,6 +121,11 @@ func (r *Remote) LoadModel(modelID, path string, opts engine.LoadOptions) error 
 	}
 	r.modelID.Store(modelID)
 	r.loaded.Store(true)
+	r.contextSize.Store(int64(opts.CtxSize))
+	r.gpuLayers.Store(int64(opts.GPULayers))
+	r.threads.Store(int64(opts.Threads))
+	r.loadedAt.Store(time.Now().UTC().Format(time.RFC3339))
+	r.lastError.Store("")
 	r.state.Store(engine.StateReady)
 	return nil
 }
@@ -119,6 +137,10 @@ func (r *Remote) UnloadModel() {
 	_, _ = r.worker.Call(context.Background(), rpc.MethodUnloadModel, nil)
 	r.modelID.Store("")
 	r.loaded.Store(false)
+	r.contextSize.Store(0)
+	r.gpuLayers.Store(0)
+	r.threads.Store(0)
+	r.loadedAt.Store("")
 	r.state.Store(engine.StateIdle)
 }
 
@@ -131,6 +153,38 @@ func (r *Remote) LoadedModelID() string {
 	r.refreshStatus(250 * time.Millisecond)
 	if v, ok := r.modelID.Load().(string); ok {
 		return v
+	}
+	return ""
+}
+
+func (r *Remote) LoadedContextSize() int {
+	r.refreshStatus(250 * time.Millisecond)
+	return int(r.contextSize.Load())
+}
+
+func (r *Remote) LoadedOptions() engine.LoadOptions {
+	r.refreshStatus(250 * time.Millisecond)
+	return engine.LoadOptions{
+		GPULayers: int(r.gpuLayers.Load()),
+		CtxSize:   int(r.contextSize.Load()),
+		Threads:   int(r.threads.Load()),
+	}
+}
+
+func (r *Remote) LoadedAt() time.Time {
+	r.refreshStatus(250 * time.Millisecond)
+	if raw, ok := r.loadedAt.Load().(string); ok && raw != "" {
+		if at, err := time.Parse(time.RFC3339, raw); err == nil {
+			return at
+		}
+	}
+	return time.Time{}
+}
+
+func (r *Remote) LastError() string {
+	r.refreshStatus(250 * time.Millisecond)
+	if raw, ok := r.lastError.Load().(string); ok {
+		return raw
 	}
 	return ""
 }
@@ -322,6 +376,11 @@ func (r *Remote) refreshStatus(timeout time.Duration) {
 	r.loaded.Store(status.IsLoaded)
 	r.modelID.Store(status.ModelID)
 	r.state.Store(status.State)
+	r.contextSize.Store(int64(status.ContextSize))
+	r.gpuLayers.Store(int64(status.GPULayers))
+	r.threads.Store(int64(status.Threads))
+	r.loadedAt.Store(status.LoadedAt)
+	r.lastError.Store(status.Error)
 	r.idleTimeout.Store(status.IdleTimeoutNs)
 }
 
