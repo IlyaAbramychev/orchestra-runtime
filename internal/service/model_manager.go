@@ -186,6 +186,42 @@ func (m *ModelManager) ResolveModel(ref string) (*storage.ModelEntry, error) {
 	return nil, fmt.Errorf("model %s not found", ref)
 }
 
+// CopyModel creates a new registry entry that points at the same model artifact
+// as source. This mirrors Ollama's local copy/tag behavior without duplicating
+// large GGUF files on disk.
+func (m *ModelManager) CopyModel(source, destination string) (string, error) {
+	source = strings.TrimSpace(source)
+	destination = strings.TrimSpace(destination)
+	if source == "" {
+		return "", fmt.Errorf("source is required")
+	}
+	if destination == "" {
+		return "", fmt.Errorf("destination is required")
+	}
+
+	sourceEntry, err := m.ResolveModel(source)
+	if err != nil {
+		return "", err
+	}
+	if _, err := m.ResolveModel(destination); err == nil {
+		return "", fmt.Errorf("model %s already exists", destination)
+	}
+
+	entry := cloneModelEntry(sourceEntry)
+	entry.ID = uuid.New().String()
+	entry.Name = destination
+	entry.StopTokens = append([]string(nil), sourceEntry.StopTokens...)
+	entry.License = append([]string(nil), sourceEntry.License...)
+	entry.DownloadedAt = time.Now().UTC()
+	if entry.Status == "loaded" {
+		entry.Status = "ready"
+	}
+	if err := m.registry.Add(entry); err != nil {
+		return "", fmt.Errorf("add copied model: %w", err)
+	}
+	return entry.ID, nil
+}
+
 // EnsureLoaded resolves a request model reference and loads it if necessary.
 // Concurrent first requests are serialized so the same model is not loaded
 // twice under burst traffic.

@@ -383,6 +383,60 @@ func TestDeleteOllamaResolvesModelName(t *testing.T) {
 	}
 }
 
+func TestCopyOllamaCreatesModelAlias(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:                  "source-id",
+		Name:                "llama3.2:latest",
+		Filename:            "llama3.2.gguf",
+		Status:              "ready",
+		Family:              "llama",
+		Parameters:          "3B",
+		Template:            "{{ .Prompt }}",
+		StopTokens:          []string{"<|eot_id|>"},
+		Capabilities:        storage.ModelCapabilities{Chat: true},
+		RecommendedSettings: storage.RecommendedModelSettings{ContextSize: 8192},
+		SourceURL:           "ollama://llama3.2:latest",
+		FilePath:            tmp + "/llama3.2.gguf",
+		DownloadedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, tmp)
+	handler := NewModelsHandler(manager, backend)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/copy", strings.NewReader(`{"source":"llama3.2:latest","destination":"llama-copy:latest"}`))
+	rec := httptest.NewRecorder()
+
+	handler.CopyOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "" {
+		t.Fatalf("expected empty response body, got %q", body)
+	}
+	copied, err := manager.ResolveModel("llama-copy:latest")
+	if err != nil {
+		t.Fatalf("resolve copied model: %v", err)
+	}
+	if copied.ID == "source-id" {
+		t.Fatal("expected copied model to have a new id")
+	}
+	if copied.FilePath != tmp+"/llama3.2.gguf" {
+		t.Fatalf("file path = %q", copied.FilePath)
+	}
+	if copied.Template != "{{ .Prompt }}" || len(copied.StopTokens) != 1 || copied.StopTokens[0] != "<|eot_id|>" {
+		t.Fatalf("metadata not copied: %+v", copied)
+	}
+}
+
 func TestPullOllamaNonStreamDownloadsDirectGGUF(t *testing.T) {
 	tmp := t.TempDir()
 	registry, err := storage.NewModelRegistry(tmp)

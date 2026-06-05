@@ -213,6 +213,16 @@ func TestOllamaPullDeleteAndVersionGoldenResponses(t *testing.T) {
 	})
 
 	t.Run("delete", func(t *testing.T) {
+		copyRec := httptest.NewRecorder()
+		copyReq := httptest.NewRequest(http.MethodPost, "/api/copy", strings.NewReader(
+			`{"source":"pulled:latest","destination":"pulled-copy:latest"}`,
+		))
+		modelsHandler.CopyOllama(copyRec, copyReq)
+		requireStatus(t, copyRec, http.StatusOK)
+		if body := strings.TrimSpace(copyRec.Body.String()); body != "" {
+			t.Fatalf("expected empty copy body, got %q", body)
+		}
+
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodDelete, "/api/delete", strings.NewReader(`{"model":"pulled:latest"}`))
 		modelsHandler.DeleteOllama(rec, req)

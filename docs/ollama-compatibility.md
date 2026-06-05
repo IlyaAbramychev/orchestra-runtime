@@ -15,6 +15,7 @@ Implemented:
 - `GET /api/tags`
 - `GET /api/ps`
 - `POST /api/show`
+- `POST /api/copy`
 - `DELETE /api/delete`
 - `POST /api/pull`
 - `GET /api/version`
@@ -47,7 +48,6 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 ## Next Milestones
 
 1. Additional lifecycle endpoints
-   - `POST /api/copy`
    - `POST /api/create`
    - `POST /api/push` only if Operium needs publishing.
    - Blob endpoints only if full Ollama manifest support requires them.

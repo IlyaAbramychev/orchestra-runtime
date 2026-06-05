@@ -198,6 +198,39 @@ func (h *ModelsHandler) DeleteOllama(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// CopyOllama handles POST /api/copy (Ollama-compat).
+// Body: {"source": "existing-model", "destination": "new-model"}.
+func (h *ModelsHandler) CopyOllama(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source      string `json:"source"`
+		Destination string `json:"destination"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		writeError(w, http.StatusBadRequest, "source is required")
+		return
+	}
+	if strings.TrimSpace(req.Destination) == "" {
+		writeError(w, http.StatusBadRequest, "destination is required")
+		return
+	}
+	if _, err := h.manager.CopyModel(req.Source, req.Destination); err != nil {
+		switch {
+		case strings.Contains(err.Error(), "not found"):
+			writeError(w, http.StatusNotFound, err.Error())
+		case strings.Contains(err.Error(), "already exists"):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func normalizeDirectOllamaPullRequest(req *model.OllamaPullRequest) (bool, string, string, error) {
 	name := strings.TrimSpace(req.Model)
 	sourceURL := strings.TrimSpace(req.SourceURL)
