@@ -15,7 +15,11 @@ type ModelInfo struct {
 	Quantization        string                   `json:"quantization,omitempty"`
 	Family              string                   `json:"family,omitempty"`
 	Parameters          string                   `json:"parameters,omitempty"`
+	Modelfile           string                   `json:"modelfile,omitempty"`
 	Template            string                   `json:"template,omitempty"`
+	System              string                   `json:"system,omitempty"`
+	OllamaParameters    string                   `json:"ollama_parameters,omitempty"`
+	License             []string                 `json:"license,omitempty"`
 	StopTokens          []string                 `json:"stop_tokens,omitempty"`
 	Capabilities        ModelCapabilities        `json:"capabilities"`
 	RecommendedSettings RecommendedModelSettings `json:"recommended_settings"`

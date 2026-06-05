@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -451,6 +452,93 @@ func TestPullOllamaLibraryModelSharesConcurrentProgress(t *testing.T) {
 	}
 	if !seenSuccess {
 		t.Fatal("expected second subscriber to receive success progress")
+	}
+}
+
+func TestPullOllamaLibraryModelPersistsManifestMetadata(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+
+	modelBlob := []byte("registry-model")
+	templateBlob := []byte("{{ .System }}\n{{ .Prompt }}")
+	systemBlob := []byte("You are concise.")
+	paramsBlob := []byte(`{"temperature":0.2,"stop":["<|eot_id|>","<|end|>"]}`)
+	licenseBlob := []byte("MIT")
+	blobs := map[string][]byte{
+		testSHA256Digest(modelBlob):    modelBlob,
+		testSHA256Digest(templateBlob): templateBlob,
+		testSHA256Digest(systemBlob):   systemBlob,
+		testSHA256Digest(paramsBlob):   paramsBlob,
+		testSHA256Digest(licenseBlob):  licenseBlob,
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/meta/manifests/latest":
+			w.WriteHeader(http.StatusOK)
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"schemaVersion": 2,
+				"mediaType":     "application/vnd.docker.distribution.manifest.v2+json",
+				"layers": []map[string]any{
+					{"mediaType": "application/vnd.ollama.image.model", "digest": testSHA256Digest(modelBlob), "size": len(modelBlob)},
+					{"mediaType": "application/vnd.ollama.image.template", "digest": testSHA256Digest(templateBlob), "size": len(templateBlob)},
+					{"mediaType": "application/vnd.ollama.image.system", "digest": testSHA256Digest(systemBlob), "size": len(systemBlob)},
+					{"mediaType": "application/vnd.ollama.image.params", "digest": testSHA256Digest(paramsBlob), "size": len(paramsBlob)},
+					{"mediaType": "application/vnd.ollama.image.license", "digest": testSHA256Digest(licenseBlob), "size": len(licenseBlob)},
+				},
+			}); err != nil {
+				t.Fatalf("write manifest: %v", err)
+			}
+		default:
+			prefix := "/v2/library/meta/blobs/"
+			digest := strings.TrimPrefix(r.URL.Path, prefix)
+			if digest == r.URL.Path {
+				http.NotFound(w, r)
+				return
+			}
+			body, ok := blobs[digest]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(body)
+		}
+	}))
+	defer server.Close()
+
+	ref := strings.TrimPrefix(server.URL, "http://") + "/library/meta:latest"
+	id, err := manager.PullOllamaLibraryModel(context.Background(), ref, true, nil)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	entry := registry.Get(id)
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	if entry.Template != string(templateBlob) {
+		t.Fatalf("template = %q", entry.Template)
+	}
+	if entry.System != string(systemBlob) {
+		t.Fatalf("system = %q", entry.System)
+	}
+	if len(entry.StopTokens) != 2 || entry.StopTokens[0] != "<|eot_id|>" || entry.StopTokens[1] != "<|end|>" {
+		t.Fatalf("stop tokens = %#v", entry.StopTokens)
+	}
+	if !strings.Contains(entry.OllamaParameters, `PARAMETER stop "<|eot_id|>"`) {
+		t.Fatalf("ollama parameters = %q", entry.OllamaParameters)
+	}
+	if !strings.Contains(entry.OllamaParameters, "PARAMETER temperature 0.2") {
+		t.Fatalf("ollama parameters = %q", entry.OllamaParameters)
+	}
+	if len(entry.License) != 1 || entry.License[0] != "MIT" {
+		t.Fatalf("license = %#v", entry.License)
+	}
+	if !strings.Contains(entry.Modelfile, "SYSTEM") || !strings.Contains(entry.Modelfile, "LICENSE") {
+		t.Fatalf("modelfile = %q", entry.Modelfile)
 	}
 }
 

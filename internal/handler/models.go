@@ -581,10 +581,20 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model not found")
 		return
 	}
+	modelfile := entry.Modelfile
+	if modelfile == "" {
+		modelfile = buildShowModelfile(entry)
+	}
+	parameters := entry.OllamaParameters
+	if parameters == "" {
+		parameters = buildShowParameters(entry.StopTokens)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"modelfile":  "", // placeholder — we don't support Modelfile yet
-		"parameters": "", // future: surface load-time params
+		"modelfile":  modelfile,
+		"parameters": parameters,
 		"template":   entry.Template,
+		"system":     entry.System,
+		"license":    entry.License,
 		"details": map[string]any{
 			"format":             "gguf",
 			"family":             entry.Family,
@@ -599,8 +609,50 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 			"general.size_bytes": entry.Size,
 			"general.file_path":  entry.FilePath,
 			"general.sha256":     entry.SHA256,
+			"general.source_url": entry.SourceURL,
 		},
 	})
+}
+
+func buildShowModelfile(entry *storage.ModelEntry) string {
+	from := entry.Name
+	if source := strings.TrimPrefix(entry.SourceURL, "ollama://"); source != entry.SourceURL && source != "" {
+		from = source
+	}
+	lines := []string{"FROM " + from}
+	if entry.Template != "" {
+		lines = append(lines, renderShowBlock("TEMPLATE", entry.Template))
+	}
+	if entry.System != "" {
+		lines = append(lines, renderShowBlock("SYSTEM", entry.System))
+	}
+	if params := buildShowParameters(entry.StopTokens); params != "" {
+		lines = append(lines, params)
+	}
+	for _, license := range entry.License {
+		if strings.TrimSpace(license) != "" {
+			lines = append(lines, renderShowBlock("LICENSE", license))
+		}
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func buildShowParameters(stopTokens []string) string {
+	if len(stopTokens) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(stopTokens))
+	for _, stop := range stopTokens {
+		if stop == "" {
+			continue
+		}
+		lines = append(lines, "PARAMETER stop "+fmt.Sprintf("%q", stop))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderShowBlock(name, value string) string {
+	return name + ` """` + "\n" + strings.TrimSpace(value) + "\n" + `"""`
 }
 
 func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
@@ -613,7 +665,11 @@ func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
 		Quantization:        e.Quantization,
 		Family:              e.Family,
 		Parameters:          e.Parameters,
+		Modelfile:           e.Modelfile,
 		Template:            e.Template,
+		System:              e.System,
+		OllamaParameters:    e.OllamaParameters,
+		License:             append([]string(nil), e.License...),
 		StopTokens:          e.StopTokens,
 		Capabilities:        toModelCapabilities(e.Capabilities),
 		RecommendedSettings: toRecommendedSettings(e.RecommendedSettings),

@@ -289,6 +289,11 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 		Status:     "ready",
 		Family:     "bge",
 		Parameters: "1B",
+		Template:   "{{ .Prompt }}",
+		System:     "Answer briefly.",
+		License:    []string{"Apache-2.0"},
+		StopTokens: []string{"<|end|>"},
+		SourceURL:  "ollama://library/bge-embed:latest",
 	}); err != nil {
 		t.Fatalf("add model: %v", err)
 	}
@@ -308,6 +313,11 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 	var resp struct {
 		Capabilities        model.ModelCapabilities        `json:"capabilities"`
 		RecommendedSettings model.RecommendedModelSettings `json:"recommended_settings"`
+		Modelfile           string                         `json:"modelfile"`
+		Parameters          string                         `json:"parameters"`
+		Template            string                         `json:"template"`
+		System              string                         `json:"system"`
+		License             []string                       `json:"license"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -320,6 +330,24 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 	}
 	if resp.RecommendedSettings.ContextSize == 0 {
 		t.Fatal("expected recommended context size")
+	}
+	if !strings.Contains(resp.Modelfile, "FROM library/bge-embed:latest") {
+		t.Fatalf("modelfile = %q", resp.Modelfile)
+	}
+	if !strings.Contains(resp.Modelfile, "TEMPLATE") || !strings.Contains(resp.Modelfile, "SYSTEM") || !strings.Contains(resp.Modelfile, "LICENSE") {
+		t.Fatalf("modelfile missing manifest sections: %q", resp.Modelfile)
+	}
+	if resp.Parameters != `PARAMETER stop "<|end|>"` {
+		t.Fatalf("parameters = %q", resp.Parameters)
+	}
+	if resp.Template != "{{ .Prompt }}" {
+		t.Fatalf("template = %q", resp.Template)
+	}
+	if resp.System != "Answer briefly." {
+		t.Fatalf("system = %q", resp.System)
+	}
+	if len(resp.License) != 1 || resp.License[0] != "Apache-2.0" {
+		t.Fatalf("license = %#v", resp.License)
 	}
 }
 

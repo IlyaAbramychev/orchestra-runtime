@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -438,7 +440,10 @@ func (m *ModelManager) ollamaManifestEntry(
 	if template == "" {
 		template = readTextLayer(layerPaths, manifest.Layers, "application/vnd.ollama.image.prompt")
 	}
-	stopTokens := readStopTokens(layerPaths, manifest.Layers)
+	system := readTextLayer(layerPaths, manifest.Layers, "application/vnd.ollama.image.system")
+	parameters, stopTokens := readOllamaParameters(layerPaths, manifest.Layers)
+	license := readTextLayers(layerPaths, manifest.Layers, "application/vnd.ollama.image.license")
+	modelfile := buildOllamaModelfile(ref, template, system, parameters, license)
 	capabilities := inferModelCapabilities(ref.Name, filename)
 	settings := inferRecommendedSettings(meta)
 
@@ -450,7 +455,11 @@ func (m *ModelManager) ollamaManifestEntry(
 		Quantization:        meta.quantization,
 		Family:              meta.family,
 		Parameters:          meta.parameters,
+		Modelfile:           modelfile,
 		Template:            template,
+		System:              system,
+		OllamaParameters:    parameters,
+		License:             license,
 		StopTokens:          stopTokens,
 		Capabilities:        capabilities,
 		RecommendedSettings: settings,
@@ -484,39 +493,120 @@ func readTextLayer(paths map[string]string, layers []ollamaLayer, mediaType stri
 	return ""
 }
 
-func readStopTokens(paths map[string]string, layers []ollamaLayer) []string {
+func readTextLayers(paths map[string]string, layers []ollamaLayer, mediaType string) []string {
+	values := []string{}
+	for _, layer := range layers {
+		if layer.MediaType != mediaType {
+			continue
+		}
+		data, err := os.ReadFile(paths[layer.Digest])
+		if err == nil {
+			value := strings.TrimSpace(string(data))
+			if value != "" {
+				values = append(values, value)
+			}
+		}
+	}
+	return values
+}
+
+func readOllamaParameters(paths map[string]string, layers []ollamaLayer) (string, []string) {
 	for _, layer := range layers {
 		if layer.MediaType != "application/vnd.ollama.image.params" {
 			continue
 		}
 		data, err := os.ReadFile(paths[layer.Digest])
 		if err != nil {
-			return nil
+			return "", nil
 		}
 		var params map[string]any
 		if err := json.Unmarshal(data, &params); err != nil {
-			return nil
+			return strings.TrimSpace(string(data)), nil
 		}
-		raw, ok := params["stop"]
-		if !ok {
-			return nil
-		}
-		switch value := raw.(type) {
-		case string:
-			return []string{value}
-		case []any:
-			stops := make([]string, 0, len(value))
-			for _, item := range value {
-				if stop, ok := item.(string); ok {
-					stops = append(stops, stop)
-				}
+		return renderOllamaParameters(params), extractStopTokens(params["stop"])
+	}
+	return "", nil
+}
+
+func extractStopTokens(raw any) []string {
+	switch value := raw.(type) {
+	case string:
+		return []string{value}
+	case []any:
+		stops := make([]string, 0, len(value))
+		for _, item := range value {
+			if stop, ok := item.(string); ok {
+				stops = append(stops, stop)
 			}
-			return stops
+		}
+		return stops
+	default:
+		return nil
+	}
+}
+
+func renderOllamaParameters(params map[string]any) string {
+	if len(params) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(params))
+	for key := range params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		switch value := params[key].(type) {
+		case []any:
+			for _, item := range value {
+				lines = append(lines, "PARAMETER "+key+" "+renderOllamaParameterValue(item))
+			}
 		default:
-			return nil
+			lines = append(lines, "PARAMETER "+key+" "+renderOllamaParameterValue(value))
 		}
 	}
-	return nil
+	return strings.Join(lines, "\n")
+}
+
+func renderOllamaParameterValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strconv.Quote(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	case nil:
+		return "null"
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(encoded)
+	}
+}
+
+func buildOllamaModelfile(ref ollamaRegistryRef, template, system, parameters string, licenses []string) string {
+	lines := []string{"FROM " + ref.Name}
+	if template != "" {
+		lines = append(lines, renderOllamaBlock("TEMPLATE", template))
+	}
+	if system != "" {
+		lines = append(lines, renderOllamaBlock("SYSTEM", system))
+	}
+	if parameters != "" {
+		lines = append(lines, parameters)
+	}
+	for _, license := range licenses {
+		lines = append(lines, renderOllamaBlock("LICENSE", license))
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func renderOllamaBlock(name, value string) string {
+	return name + ` """` + "\n" + strings.TrimSpace(value) + "\n" + `"""`
 }
 
 func shortDigest(digest string) string {
