@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -113,11 +114,15 @@ func TestOllamaCompatibilitySmokeSuite(t *testing.T) {
 	})
 
 	t.Run("unsupported images reject explicitly", func(t *testing.T) {
-		var resp map[string]string
+		var resp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
 		smokeJSON(t, server.URL, http.MethodPost, "/api/chat",
 			`{"model":"chat-smoke:latest","stream":false,"messages":[{"role":"user","content":"image","images":["aGVsbG8="]}]}`,
 			http.StatusBadRequest, &resp)
-		if !strings.Contains(resp["error"], "multimodal images") {
+		if !strings.Contains(resp.Error.Message, "multimodal images") {
 			t.Fatalf("unexpected error: %+v", resp)
 		}
 	})
@@ -297,6 +302,11 @@ func (b *ollamaSmokeBackend) LoadedModelID() string { return b.loaded }
 func (b *ollamaSmokeBackend) State() string         { return engine.StateReady }
 func (b *ollamaSmokeBackend) ModelDesc() string     { return "" }
 func (b *ollamaSmokeBackend) Complete(_ context.Context, messages []engine.ChatMessage, _ engine.CompletionParams) (*engine.CompletionResult, error) {
+	for _, message := range messages {
+		if len(message.Images) > 0 {
+			return nil, fmt.Errorf("multimodal images require a loaded mmproj")
+		}
+	}
 	text := "hello from smoke"
 	if len(messages) > 0 {
 		content := messages[len(messages)-1].Content
@@ -318,6 +328,11 @@ func (b *ollamaSmokeBackend) Complete(_ context.Context, messages []engine.ChatM
 	}, nil
 }
 func (b *ollamaSmokeBackend) CompleteStream(_ context.Context, messages []engine.ChatMessage, _ engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
+	for _, message := range messages {
+		if len(message.Images) > 0 {
+			return nil, fmt.Errorf("multimodal images require a loaded mmproj")
+		}
+	}
 	text := "smoke"
 	if len(messages) > 0 {
 		content := messages[len(messages)-1].Content

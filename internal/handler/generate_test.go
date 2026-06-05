@@ -34,8 +34,10 @@ func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 }
 
 func TestGenerateImagesRequireMMProj(t *testing.T) {
-	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
-	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(`{"model":"test","prompt":"hi","images":["aGVsbG8="]}`))
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{
+		completeErr: fmt.Errorf("multimodal images require a loaded mmproj"),
+	}, 1))
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(`{"model":"test","prompt":"hi","images":["aGVsbG8="],"stream":false}`))
 	rec := httptest.NewRecorder()
 
 	h.Generate(rec, req)
@@ -43,15 +45,14 @@ func TestGenerateImagesRequireMMProj(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("ORCHESTRA_MMPROJ_PATH")) {
-		t.Fatalf("expected mmproj hint, got %s", rec.Body.String())
+	if !bytes.Contains(rec.Body.Bytes(), []byte("loaded mmproj")) {
+		t.Fatalf("expected mmproj error, got %s", rec.Body.String())
 	}
 }
 
-func TestGenerateImagesForwardWhenEnabled(t *testing.T) {
+func TestGenerateImagesForwardToBackend(t *testing.T) {
 	backend := &fakeChatBackend{}
 	h := NewGenerateHandler(service.NewInferenceService(backend, 1))
-	h.SetMultimodalEnabled(true)
 	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(`{"model":"test","prompt":"hi","images":["aGVsbG8="],"stream":false}`))
 	rec := httptest.NewRecorder()
 

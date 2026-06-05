@@ -73,6 +73,12 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - A router-level Ollama compatibility smoke suite covers version, capabilities,
   tags, chat, generate streaming, structured output, tool calls, thinking,
   multimodal configuration gating, and embeddings.
+- Real multimodal compatibility fixtures are available as env-gated integration
+  tests. Set `ORCHESTRA_TEST_VISION_MODEL_PATH` and
+  `ORCHESTRA_TEST_VISION_MMPROJ_PATH` to run a real `/api/chat` and
+  `/api/generate` image request against a compatible vision pair; optionally
+  set `ORCHESTRA_TEST_BAD_MMPROJ_PATH` to verify projector/model mismatch
+  failures.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
 - Durations in chat and generate responses are returned in nanoseconds.
 
@@ -85,8 +91,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 2. Advanced request parity
    - Token-level streaming tool-call/thinking deltas and tool-result lifecycle
      hardening.
-   - Multimodal operational maturity: compatibility fixtures and broader
-     client coverage.
+   - Multimodal operational maturity: broader client coverage and release
+     fixtures beyond the env-gated vision integration tests.
    - Broader JSON Schema compatibility fixtures against Ollama clients.
    - Backend-level thinking controls.
 

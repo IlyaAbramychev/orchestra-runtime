@@ -96,8 +96,6 @@ func (s *Server) Start() error {
 	// Initialize handlers
 	chatH := handler.NewChatHandler(inferSvc)
 	genH := handler.NewGenerateHandler(inferSvc)
-	chatH.SetMultimodalEnabled(s.cfg.MMProjPath != "")
-	genH.SetMultimodalEnabled(s.cfg.MMProjPath != "")
 	embH := handler.NewEmbedHandler(embedSvc, inferSvc)
 	modelsH := handler.NewModelsHandler(modelMgr, s.backend)
 	systemH := handler.NewSystemHandler(sysInfo)

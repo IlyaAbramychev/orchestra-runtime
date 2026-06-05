@@ -16,16 +16,11 @@ import (
 // GenerateHandler serves Ollama's /api/generate. Same engine as chat, but
 // the prompt is raw (no chat template) unless `system` is provided.
 type GenerateHandler struct {
-	inference         *service.InferenceService
-	multimodalEnabled bool
+	inference *service.InferenceService
 }
 
 func NewGenerateHandler(inf *service.InferenceService) *GenerateHandler {
 	return &GenerateHandler{inference: inf}
-}
-
-func (h *GenerateHandler) SetMultimodalEnabled(enabled bool) {
-	h.multimodalEnabled = enabled
 }
 
 // Generate handles POST /api/generate.
@@ -39,7 +34,7 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
-	if err := validateGenerateRequest(&req, h.multimodalEnabled); err != nil {
+	if err := validateGenerateRequest(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -443,7 +438,7 @@ func toEngineParamsFromGenerate(req *model.GenerateRequest) engine.CompletionPar
 	return p
 }
 
-func validateGenerateRequest(req *model.GenerateRequest, multimodalEnabled bool) error {
+func validateGenerateRequest(req *model.GenerateRequest) error {
 	if req.Template != "" {
 		return fmt.Errorf("template is not supported yet")
 	}
@@ -452,11 +447,6 @@ func validateGenerateRequest(req *model.GenerateRequest, multimodalEnabled bool)
 	}
 	if req.Suffix != "" {
 		return fmt.Errorf("suffix is not supported yet")
-	}
-	if len(req.Images) > 0 {
-		if !multimodalEnabled {
-			return fmt.Errorf("multimodal images require ORCHESTRA_MMPROJ_PATH")
-		}
 	}
 	return nil
 }

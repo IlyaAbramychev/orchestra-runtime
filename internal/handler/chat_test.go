@@ -308,7 +308,9 @@ func TestOllamaChatToolsStreamBuffered(t *testing.T) {
 }
 
 func TestOllamaChatImagesRejectUnsupported(t *testing.T) {
-	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+		completeErr: fmt.Errorf("multimodal images require a loaded mmproj"),
+	}, 1))
 	body := bytes.NewBufferString(`{"model":"test","stream":false,"messages":[{"role":"user","content":"what is this?","images":["aGVsbG8="]}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
@@ -318,15 +320,14 @@ func TestOllamaChatImagesRejectUnsupported(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("ORCHESTRA_MMPROJ_PATH")) {
-		t.Fatalf("expected mmproj hint, got %s", rec.Body.String())
+	if !bytes.Contains(rec.Body.Bytes(), []byte("loaded mmproj")) {
+		t.Fatalf("expected mmproj error, got %s", rec.Body.String())
 	}
 }
 
-func TestOllamaChatImagesForwardWhenEnabled(t *testing.T) {
+func TestOllamaChatImagesForwardToBackend(t *testing.T) {
 	backend := &fakeChatBackend{}
 	h := NewChatHandler(service.NewInferenceService(backend, 1))
-	h.SetMultimodalEnabled(true)
 	body := bytes.NewBufferString(`{"model":"test","stream":false,"messages":[{"role":"user","content":"what is this?","images":["aGVsbG8="]}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
