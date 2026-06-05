@@ -166,6 +166,85 @@ func TestOllamaChatFormatRejectsStreaming(t *testing.T) {
 	}
 }
 
+func TestOllamaChatToolCallsResponseShape(t *testing.T) {
+	backend := &fakeChatBackend{completeText: `{"tool_calls":[{"type":"function","function":{"name":"get_weather","arguments":{"city":"Paris"}}}]}`}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"stream":false,
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"get_weather",
+					"description":"Get weather",
+					"parameters":{
+						"type":"object",
+						"properties":{"city":{"type":"string"}},
+						"required":["city"]
+					}
+				}
+			}
+		],
+		"messages":[{"role":"user","content":"weather in Paris"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OllamaChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.DoneReason != "tool_calls" {
+		t.Fatalf("done reason = %q", resp.DoneReason)
+	}
+	if resp.Message.Content != "" {
+		t.Fatalf("content = %q", resp.Message.Content)
+	}
+	if len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %+v", resp.Message.ToolCalls)
+	}
+	call := resp.Message.ToolCalls[0]
+	if call.Type != "function" || call.Function.Name != "get_weather" {
+		t.Fatalf("unexpected tool call: %+v", call)
+	}
+	if call.Function.Arguments["city"] != "Paris" {
+		t.Fatalf("unexpected arguments: %+v", call.Function.Arguments)
+	}
+}
+
+func TestOllamaChatToolsRejectStreaming(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{"model":"test","tools":[{"type":"function","function":{"name":"get_weather"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOllamaChatToolCallsRejectUnknownTool(t *testing.T) {
+	backend := &fakeChatBackend{completeText: `{"tool_calls":[{"function":{"name":"delete_everything","arguments":{}}}]}`}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"tools":[{"type":"function","function":{"name":"get_weather"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOllamaChatDefaultsToNDJSONStream(t *testing.T) {
 	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
 	body := bytes.NewBufferString(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`)

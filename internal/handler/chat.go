@@ -58,13 +58,27 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 	if req.Stream != nil {
 		stream = *req.Stream
 	}
+	if len(req.Tools) > 0 && hasMeaningfulRawJSON(req.Format) {
+		writeError(w, http.StatusBadRequest, "format cannot be combined with tools")
+		return
+	}
 	if stream && hasMeaningfulRawJSON(req.Format) {
 		writeError(w, http.StatusBadRequest, "streaming structured output is not supported yet")
+		return
+	}
+	if stream && len(req.Tools) > 0 {
+		writeError(w, http.StatusBadRequest, "streaming tool calls are not supported yet")
 		return
 	}
 
 	chatReq := ollamaToChatCompletionRequest(&req)
 	if instruction, ok, err := structuredFormatInstruction(req.Format); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if ok {
+		chatReq.Messages = withStructuredInstruction(chatReq.Messages, instruction)
+	}
+	if instruction, ok, err := toolCallInstruction(req.Tools); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	} else if ok {
@@ -89,26 +103,38 @@ func (h *ChatHandler) handleOllamaComplete(
 		writeRuntimeError(w, err)
 		return
 	}
+	toolCalls, hasToolCalls, err := parseToolCallsFromText(result.Text, req.Tools)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	if err := validateStructuredOutput(req.Format, result.Text); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	h.inference.ApplyKeepAlive(req.KeepAlive)
+	message := model.ChatMessage{
+		Role:    "assistant",
+		Content: result.Text,
+	}
+	doneReason := result.FinishReason
+	if hasToolCalls {
+		message.Content = ""
+		message.ToolCalls = toolCalls
+		doneReason = "tool_calls"
+	}
 
 	resp := model.OllamaChatResponse{
-		Model:     req.Model,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		Message: model.ChatMessage{
-			Role:    "assistant",
-			Content: result.Text,
-		},
+		Model:                req.Model,
+		CreatedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		Message:              message,
 		Done:                 true,
 		TotalDurationNs:      result.Timings.TotalNs,
 		PromptEvalDurationNs: result.Timings.PromptEvalNs,
 		PromptEvalCount:      result.PromptTokens,
 		EvalDurationNs:       result.Timings.EvalNs,
 		EvalCount:            result.CompletionTokens,
-		DoneReason:           result.FinishReason,
+		DoneReason:           doneReason,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

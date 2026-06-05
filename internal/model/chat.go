@@ -34,8 +34,11 @@ type ChatCompletionRequest struct {
 }
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking,omitempty"`
+	ToolName  string     `json:"tool_name,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // OllamaChatRequest is the /api/chat request shape. Ollama defaults to
@@ -46,8 +49,31 @@ type OllamaChatRequest struct {
 	Messages  []ChatMessage    `json:"messages"`
 	Stream    *bool            `json:"stream,omitempty"`
 	Format    json.RawMessage  `json:"format,omitempty"`
+	Tools     []ToolDefinition `json:"tools,omitempty"`
 	Options   *GenerateOptions `json:"options,omitempty"`
 	KeepAlive *int64           `json:"keep_alive,omitempty"`
+}
+
+type ToolDefinition struct {
+	Type     string       `json:"type,omitempty"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type ToolCall struct {
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Index     int            `json:"index,omitempty"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
 type OllamaChatResponse struct {
