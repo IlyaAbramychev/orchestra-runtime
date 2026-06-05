@@ -32,13 +32,14 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   GGUF downloads outside an Ollama registry.
 - Streaming pull responses use newline-delimited JSON and end with
   `{"status":"success"}`.
+- Concurrent `/api/pull` calls for the same Ollama registry model share the
+  active download and progress stream.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
 - Durations in chat and generate responses are returned in nanoseconds.
 
 ## Next Milestones
 
 1. Full Ollama pull registry support
-   - Share progress for concurrent pulls.
    - Persist richer manifest metadata for `/api/show`.
    - Add integration coverage against the public Ollama registry with a small
      model fixture or recorded registry responses.

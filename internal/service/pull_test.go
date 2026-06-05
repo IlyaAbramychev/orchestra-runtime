@@ -1,12 +1,14 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,5 +355,121 @@ func TestPullModelRetriesFailedEntryWithSameID(t *testing.T) {
 	}
 	if entry.SHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatalf("sha256 = %q", entry.SHA256)
+	}
+}
+
+func TestPullOllamaLibraryModelSharesConcurrentProgress(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+
+	body := []byte("registry-model")
+	digest := testSHA256Digest(body)
+	var manifestHits atomic.Int32
+	var blobHits atomic.Int32
+	blobStarted := make(chan struct{})
+	releaseBlob := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/shared/manifests/latest":
+			manifestHits.Add(1)
+			writeManifestResponse(t, w, digest, len(body))
+		case "/v2/library/shared/blobs/" + digest:
+			if blobHits.Add(1) == 1 {
+				close(blobStarted)
+				<-releaseBlob
+			}
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ref := strings.TrimPrefix(server.URL, "http://") + "/library/shared:latest"
+	firstDone := make(chan struct {
+		id  string
+		err error
+	}, 1)
+	go func() {
+		id, err := manager.PullOllamaLibraryModel(context.Background(), ref, true, nil)
+		firstDone <- struct {
+			id  string
+			err error
+		}{id: id, err: err}
+	}()
+
+	select {
+	case <-blobStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first blob request")
+	}
+
+	secondProgress := make(chan string, 8)
+	secondDone := make(chan struct {
+		id  string
+		err error
+	}, 1)
+	go func() {
+		id, err := manager.PullOllamaLibraryModel(context.Background(), ref, true, func(progress OllamaPullProgress) {
+			secondProgress <- progress.Status
+		})
+		secondDone <- struct {
+			id  string
+			err error
+		}{id: id, err: err}
+	}()
+
+	close(releaseBlob)
+
+	first := <-firstDone
+	second := <-secondDone
+	if first.err != nil {
+		t.Fatalf("first pull failed: %v", first.err)
+	}
+	if second.err != nil {
+		t.Fatalf("second pull failed: %v", second.err)
+	}
+	if first.id == "" || first.id != second.id {
+		t.Fatalf("expected shared model id, got first=%q second=%q", first.id, second.id)
+	}
+	if manifestHits.Load() != 1 {
+		t.Fatalf("manifest hits = %d", manifestHits.Load())
+	}
+	if blobHits.Load() != 1 {
+		t.Fatalf("blob hits = %d", blobHits.Load())
+	}
+	close(secondProgress)
+	seenSuccess := false
+	for status := range secondProgress {
+		if status == "success" {
+			seenSuccess = true
+		}
+	}
+	if !seenSuccess {
+		t.Fatal("expected second subscriber to receive success progress")
+	}
+}
+
+func testSHA256Digest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func writeManifestResponse(t *testing.T, w http.ResponseWriter, digest string, size int) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+	_, err := fmt.Fprintf(w, `{
+		"schemaVersion": 2,
+		"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+		"layers": [
+			{"mediaType": "application/vnd.ollama.image.model", "digest": %q, "size": %d}
+		]
+	}`, digest, size)
+	if err != nil {
+		t.Fatalf("write manifest: %v", err)
 	}
 }

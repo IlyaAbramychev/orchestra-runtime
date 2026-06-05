@@ -63,6 +63,7 @@ type ModelManager struct {
 	loadMu             sync.Mutex
 	pullMu             sync.Mutex
 	downloads          sync.Map // id -> *DownloadState
+	ollamaPulls        sync.Map // registry ref -> *ollamaPullState
 }
 
 func NewModelManager(registry *storage.ModelRegistry, eng engine.Backend, modelsDir string) *ModelManager {

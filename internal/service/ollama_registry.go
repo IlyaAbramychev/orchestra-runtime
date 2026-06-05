@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,15 @@ type OllamaPullProgress struct {
 	Completed int64
 }
 
+type ollamaPullState struct {
+	done chan struct{}
+
+	mu        sync.Mutex
+	callbacks []func(OllamaPullProgress)
+	id        string
+	err       error
+}
+
 type ollamaRegistryRef struct {
 	Original string
 	Scheme   string
@@ -34,6 +44,10 @@ type ollamaRegistryRef struct {
 	Repo     string
 	Tag      string
 	Name     string
+}
+
+func (r ollamaRegistryRef) cacheKey() string {
+	return r.Scheme + "://" + r.Host + "/" + r.Repo + ":" + r.Tag
 }
 
 type ollamaManifest struct {
@@ -67,18 +81,40 @@ func (m *ModelManager) PullOllamaLibraryModel(
 		progress = func(OllamaPullProgress) {}
 	}
 
+	key := parsed.cacheKey()
 	m.pullMu.Lock()
-	defer m.pullMu.Unlock()
-
 	if existing := m.findExistingOllamaPull(parsed.Name); existing != nil {
+		m.pullMu.Unlock()
 		progress(OllamaPullProgress{Status: "success"})
 		return existing.ID, nil
 	}
+	if active, ok := m.ollamaPulls.Load(key); ok {
+		state := active.(*ollamaPullState)
+		state.subscribe(progress)
+		m.pullMu.Unlock()
 
-	progress(OllamaPullProgress{Status: "pulling manifest"})
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-state.done:
+			return state.result()
+		}
+	}
+
+	state := &ollamaPullState{done: make(chan struct{})}
+	state.subscribe(progress)
+	m.ollamaPulls.Store(key, state)
+	m.pullMu.Unlock()
+	defer func() {
+		m.ollamaPulls.Delete(key)
+		close(state.done)
+	}()
+
+	state.emit(OllamaPullProgress{Status: "pulling manifest"})
 	manifest, err := m.fetchOllamaManifest(ctx, parsed)
 	if err != nil {
-		return "", fmt.Errorf("pull model manifest: %w", err)
+		state.err = fmt.Errorf("pull model manifest: %w", err)
+		return "", state.err
 	}
 
 	layers := append([]ollamaLayer(nil), manifest.Layers...)
@@ -90,8 +126,9 @@ func (m *ModelManager) PullOllamaLibraryModel(
 	layerPaths := make(map[string]string, len(layers))
 	for i := range layers {
 		layer := layers[i]
-		path, err := m.downloadOllamaBlob(ctx, parsed, layer, progress)
+		path, err := m.downloadOllamaBlob(ctx, parsed, layer, state.emit)
 		if err != nil {
+			state.err = err
 			return "", err
 		}
 		layerPaths[layer.Digest] = path
@@ -101,12 +138,14 @@ func (m *ModelManager) PullOllamaLibraryModel(
 		}
 	}
 	if modelLayer == nil {
-		return "", fmt.Errorf("manifest does not contain a GGUF model layer")
+		state.err = fmt.Errorf("manifest does not contain a GGUF model layer")
+		return "", state.err
 	}
 
-	progress(OllamaPullProgress{Status: "verifying sha256 digest"})
+	state.emit(OllamaPullProgress{Status: "verifying sha256 digest"})
 	for _, layer := range layers {
 		if err := verifyDigestFile(layer.Digest, layerPaths[layer.Digest]); err != nil {
+			state.err = err
 			return "", err
 		}
 	}
@@ -115,15 +154,42 @@ func (m *ModelManager) PullOllamaLibraryModel(
 	if existing := m.findExistingOllamaPull(parsed.Name); existing != nil {
 		entry.ID = existing.ID
 		if err := m.registry.Update(entry); err != nil {
-			return "", fmt.Errorf("update registry: %w", err)
+			state.err = fmt.Errorf("update registry: %w", err)
+			return "", state.err
 		}
 	} else if err := m.registry.Add(entry); err != nil {
-		return "", fmt.Errorf("add to registry: %w", err)
+		state.err = fmt.Errorf("add to registry: %w", err)
+		return "", state.err
 	}
 
-	progress(OllamaPullProgress{Status: "writing manifest"})
-	progress(OllamaPullProgress{Status: "success"})
+	state.id = entry.ID
+	state.emit(OllamaPullProgress{Status: "writing manifest"})
+	state.emit(OllamaPullProgress{Status: "success"})
 	return entry.ID, nil
+}
+
+func (s *ollamaPullState) subscribe(fn func(OllamaPullProgress)) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.callbacks = append(s.callbacks, fn)
+}
+
+func (s *ollamaPullState) emit(progress OllamaPullProgress) {
+	s.mu.Lock()
+	callbacks := append([]func(OllamaPullProgress){}, s.callbacks...)
+	s.mu.Unlock()
+	for _, fn := range callbacks {
+		fn(progress)
+	}
+}
+
+func (s *ollamaPullState) result() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.id, s.err
 }
 
 func (m *ModelManager) findExistingOllamaPull(name string) *storage.ModelEntry {
