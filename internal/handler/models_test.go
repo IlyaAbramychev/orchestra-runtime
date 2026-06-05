@@ -353,6 +353,105 @@ func TestDeleteOllamaResolvesModelName(t *testing.T) {
 	}
 }
 
+func TestPullOllamaNonStreamDownloadsDirectGGUF(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, tmp)
+	handler := NewModelsHandler(manager, backend)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("model"))
+	}))
+	defer server.Close()
+
+	body := `{"model":"tiny:latest","source_url":"` + server.URL + `/tiny.gguf","stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/api/pull", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handler.PullOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OllamaPullResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "success" {
+		t.Fatalf("status = %q", resp.Status)
+	}
+	if _, err := manager.ResolveModel("tiny:latest"); err != nil {
+		t.Fatalf("expected pulled model to be registered: %v", err)
+	}
+}
+
+func TestPullOllamaStreamsProgress(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, tmp)
+	handler := NewModelsHandler(manager, backend)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("model"))
+	}))
+	defer server.Close()
+
+	body := `{"model":"tiny-stream","source_url":"` + server.URL + `/tiny-stream.gguf"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/pull", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handler.PullOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected streamed chunks, got %q", rec.Body.String())
+	}
+	var first model.OllamaPullResponse
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("decode first chunk: %v", err)
+	}
+	if first.Status != "pulling manifest" {
+		t.Fatalf("first status = %q", first.Status)
+	}
+	var last model.OllamaPullResponse
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &last); err != nil {
+		t.Fatalf("decode last chunk: %v", err)
+	}
+	if last.Status != "success" {
+		t.Fatalf("last status = %q; body=%s", last.Status, rec.Body.String())
+	}
+}
+
+func TestPullOllamaRequiresSourceURLForLibraryNames(t *testing.T) {
+	registry, err := storage.NewModelRegistry(t.TempDir())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, t.TempDir())
+	handler := NewModelsHandler(manager, backend)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/pull", strings.NewReader(`{"model":"llama3.2"}`))
+	rec := httptest.NewRecorder()
+
+	handler.PullOllama(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func waitForSchedulerState(t *testing.T, scheduler *service.RuntimeScheduler, want string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

@@ -65,6 +65,21 @@ type PullModelResponse struct {
 	Status string `json:"status"`
 }
 
+type OllamaPullRequest struct {
+	Model     string `json:"model"`
+	SourceURL string `json:"source_url,omitempty"` // Orchestra extension: direct GGUF URL
+	Insecure  bool   `json:"insecure,omitempty"`
+	Stream    *bool  `json:"stream,omitempty"`
+}
+
+type OllamaPullResponse struct {
+	Status    string `json:"status"`
+	Digest    string `json:"digest,omitempty"`
+	Total     int64  `json:"total,omitempty"`
+	Completed int64  `json:"completed,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // LoadModelRequest is the payload for POST /api/models/{id}/load. All fields
 // are optional — omit to inherit the runtime default. Flag names mirror
 // llama.cpp CLI where possible so users familiar with llama-server recognise

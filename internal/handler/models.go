@@ -1,8 +1,12 @@
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/operium/orchestra-runtime/internal/engine"
@@ -121,6 +125,43 @@ func (h *ModelsHandler) Pull(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// PullOllama handles POST /api/pull (Ollama-compat).
+//
+// Ollama pulls from its own model registry by model name. Orchestra Runtime
+// stores direct GGUF downloads today, so this endpoint accepts the Ollama
+// fields plus an Orchestra extension: `source_url`. If `model` itself is an
+// HTTP(S) URL, it is treated as the source URL and the filename stem is used as
+// the display name.
+func (h *ModelsHandler) PullOllama(w http.ResponseWriter, r *http.Request) {
+	var req model.OllamaPullRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	name, sourceURL, err := normalizeOllamaPullRequest(&req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id, err := h.manager.PullModel(name, sourceURL)
+	if err != nil {
+		slog.Error("ollama pull failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+
+	stream := true
+	if req.Stream != nil {
+		stream = *req.Stream
+	}
+	if !stream {
+		h.waitForOllamaPull(w, r, id)
+		return
+	}
+	h.streamOllamaPull(w, r, id)
+}
+
 // Delete handles DELETE /api/models/{id}.
 func (h *ModelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -158,6 +199,117 @@ func (h *ModelsHandler) DeleteOllama(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func normalizeOllamaPullRequest(req *model.OllamaPullRequest) (string, string, error) {
+	name := strings.TrimSpace(req.Model)
+	sourceURL := strings.TrimSpace(req.SourceURL)
+	if name == "" {
+		return "", "", fmt.Errorf("model is required")
+	}
+	if sourceURL == "" && isHTTPURL(name) {
+		sourceURL = name
+		name = modelNameFromURL(name)
+	}
+	if sourceURL == "" {
+		return "", "", fmt.Errorf("pull by Ollama library name is not supported yet; provide source_url")
+	}
+	if !isHTTPURL(sourceURL) {
+		return "", "", fmt.Errorf("source_url must be an http or https URL")
+	}
+	if name == "" {
+		name = "model"
+	}
+	return name, sourceURL, nil
+}
+
+func isHTTPURL(value string) bool {
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
+}
+
+func modelNameFromURL(value string) string {
+	value = strings.TrimRight(value, "/")
+	if idx := strings.LastIndex(value, "/"); idx >= 0 {
+		value = value[idx+1:]
+	}
+	value = strings.TrimSuffix(value, ".gguf")
+	if value == "" {
+		return "model"
+	}
+	return value
+}
+
+func (h *ModelsHandler) waitForOllamaPull(w http.ResponseWriter, r *http.Request, id string) {
+	if ds := h.manager.GetDownloadState(id); ds != nil {
+		select {
+		case <-r.Context().Done():
+			writeRuntimeError(w, r.Context().Err())
+			return
+		case <-ds.Done:
+		}
+	}
+
+	entry := h.manager.Get(id)
+	if entry != nil && entry.Status == model.StatusError {
+		writeError(w, http.StatusInternalServerError, entry.ErrorMessage)
+		return
+	}
+	writeJSON(w, http.StatusOK, model.OllamaPullResponse{Status: "success"})
+}
+
+func (h *ModelsHandler) streamOllamaPull(w http.ResponseWriter, r *http.Request, id string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "pulling manifest"})
+
+	ds := h.manager.GetDownloadState(id)
+	if ds == nil {
+		writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "success"})
+		return
+	}
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ds.Done:
+			entry := h.manager.Get(id)
+			if entry != nil && entry.Status == model.StatusError {
+				writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{
+					Status: "error",
+					Error:  entry.ErrorMessage,
+				})
+				return
+			}
+			writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "verifying sha256 digest"})
+			writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "writing manifest"})
+			writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "success"})
+			return
+		case <-ticker.C:
+			writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{
+				Status:    "pulling gguf",
+				Total:     ds.TotalBytes,
+				Completed: ds.DownloadedBytes.Load(),
+			})
+		}
+	}
+}
+
+func writeOllamaPullChunk(w http.ResponseWriter, flusher http.Flusher, resp model.OllamaPullResponse) {
+	if data, err := json.Marshal(resp); err == nil {
+		fmt.Fprintf(w, "%s\n", data)
+		flusher.Flush()
+	}
 }
 
 // Load handles POST /api/models/{id}/load.

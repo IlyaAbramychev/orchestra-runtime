@@ -168,6 +168,7 @@ func (s *Server) buildRouter(
 		r.Get("/api/ps", modelsH.ListRunning)
 		r.Post("/api/show", modelsH.Show)
 		r.Delete("/api/delete", modelsH.DeleteOllama)
+		r.Post("/api/pull", modelsH.PullOllama)
 		r.Get("/api/version", systemH.Version)
 
 		// Model management
