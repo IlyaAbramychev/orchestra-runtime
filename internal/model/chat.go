@@ -1,5 +1,7 @@
 package model
 
+import "encoding/json"
+
 // OpenAI-compatible request/response types.
 
 type ChatCompletionRequest struct {
@@ -43,6 +45,7 @@ type OllamaChatRequest struct {
 	Model     string           `json:"model"`
 	Messages  []ChatMessage    `json:"messages"`
 	Stream    *bool            `json:"stream,omitempty"`
+	Format    json.RawMessage  `json:"format,omitempty"`
 	Options   *GenerateOptions `json:"options,omitempty"`
 	KeepAlive *int64           `json:"keep_alive,omitempty"`
 }

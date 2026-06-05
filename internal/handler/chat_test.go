@@ -18,6 +18,7 @@ import (
 
 type fakeChatBackend struct {
 	notLoaded    bool
+	completeText string
 	completeErr  error
 	streamErr    error
 	streamChunks []engine.CompletionChunk
@@ -41,8 +42,12 @@ func (f *fakeChatBackend) Complete(context.Context, []engine.ChatMessage, engine
 	if f.block != nil {
 		<-f.block
 	}
+	text := f.completeText
+	if text == "" {
+		text = "hello"
+	}
 	return &engine.CompletionResult{
-		Text:             "hello",
+		Text:             text,
 		PromptTokens:     3,
 		CompletionTokens: 2,
 		FinishReason:     "stop",
@@ -112,6 +117,52 @@ func TestOllamaChatNonStreamShape(t *testing.T) {
 	}
 	if resp.PromptEvalCount != 3 || resp.EvalCount != 2 || resp.DoneReason != "stop" {
 		t.Fatalf("missing final metrics: %+v", resp)
+	}
+}
+
+func TestOllamaChatFormatJSONValidatesResponse(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{completeText: `{"answer":"ok"}`}, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"format":"json","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OllamaChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Message.Content != `{"answer":"ok"}` {
+		t.Fatalf("content = %q", resp.Message.Content)
+	}
+}
+
+func TestOllamaChatFormatJSONRejectsInvalidModelOutput(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{completeText: `not json`}, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"format":"json","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOllamaChatFormatRejectsStreaming(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{"model":"test","format":"json","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

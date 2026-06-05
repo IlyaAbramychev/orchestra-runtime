@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
+	"github.com/operium/orchestra-runtime/internal/model"
 	"github.com/operium/orchestra-runtime/internal/rpc"
 )
 
@@ -123,4 +125,73 @@ func hasMeaningfulRawJSON(raw json.RawMessage) bool {
 		return false
 	}
 	return true
+}
+
+func structuredFormatInstruction(raw json.RawMessage) (string, bool, error) {
+	if !hasMeaningfulRawJSON(raw) {
+		return "", false, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false, fmt.Errorf("format must be \"json\" or a JSON schema object")
+	}
+	switch v := value.(type) {
+	case string:
+		if v != "json" {
+			return "", false, fmt.Errorf("format string must be \"json\"")
+		}
+		return "Respond with exactly one valid JSON object. Do not include markdown fences, commentary, or text outside the JSON object.", true, nil
+	case map[string]any:
+		schema, err := json.Marshal(v)
+		if err != nil {
+			return "", false, fmt.Errorf("format schema is invalid")
+		}
+		return "Respond with exactly one valid JSON value that conforms to this JSON Schema: " + string(schema) + ". Do not include markdown fences, commentary, or text outside the JSON.", true, nil
+	default:
+		return "", false, fmt.Errorf("format must be \"json\" or a JSON schema object")
+	}
+}
+
+func validateStructuredOutput(raw json.RawMessage, text string) error {
+	if !hasMeaningfulRawJSON(raw) {
+		return nil
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return fmt.Errorf("model returned empty structured output")
+	}
+
+	var format any
+	if err := json.Unmarshal(raw, &format); err != nil {
+		return fmt.Errorf("format must be \"json\" or a JSON schema object")
+	}
+	var output any
+	if err := json.Unmarshal([]byte(trimmed), &output); err != nil {
+		return fmt.Errorf("model returned invalid JSON for requested format")
+	}
+	if formatString, ok := format.(string); ok && formatString == "json" {
+		if _, ok := output.(map[string]any); !ok {
+			return fmt.Errorf("model returned JSON, but format \"json\" requires an object")
+		}
+	}
+	return nil
+}
+
+func withStructuredInstruction(messages []model.ChatMessage, instruction string) []model.ChatMessage {
+	out := append([]model.ChatMessage(nil), messages...)
+	for i := range out {
+		if out[i].Role == "system" {
+			out[i].Content = appendInstruction(out[i].Content, instruction)
+			return out
+		}
+	}
+	return append([]model.ChatMessage{{Role: "system", Content: instruction}}, out...)
+}
+
+func appendInstruction(existing, instruction string) string {
+	existing = strings.TrimSpace(existing)
+	if existing == "" {
+		return instruction
+	}
+	return existing + "\n\n" + instruction
 }

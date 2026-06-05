@@ -17,7 +17,6 @@ import (
 func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
 	cases := []string{
-		`{"model":"test","prompt":"hi","format":"json"}`,
 		`{"model":"test","prompt":"hi","template":"{{ .Prompt }}"}`,
 		`{"model":"test","prompt":"hi","context":[1,2,3]}`,
 		`{"model":"test","prompt":"hi","suffix":"end"}`,
@@ -31,6 +30,52 @@ func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestGenerateFormatJSONValidatesResponse(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{completeText: `{"answer":"ok"}`}, 1))
+	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json","stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.GenerateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Response != `{"answer":"ok"}` {
+		t.Fatalf("response = %q", resp.Response)
+	}
+}
+
+func TestGenerateFormatJSONRejectsInvalidModelOutput(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{completeText: `not json`}, 1))
+	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json","stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGenerateFormatRejectsStreaming(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

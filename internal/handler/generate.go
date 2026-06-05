@@ -44,6 +44,10 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 	if req.Stream != nil {
 		stream = *req.Stream
 	}
+	if stream && hasMeaningfulRawJSON(req.Format) {
+		writeError(w, http.StatusBadRequest, "streaming structured output is not supported yet")
+		return
+	}
 
 	params := toEngineParamsFromGenerate(&req)
 	if stream {
@@ -182,10 +186,21 @@ func (h *GenerateHandler) handleCompletionStream(
 func (h *GenerateHandler) handleComplete(
 	w http.ResponseWriter, r *http.Request, req *model.GenerateRequest, params engine.CompletionParams,
 ) {
-	result, err := h.inference.Generate(r.Context(), req.Model, req.Prompt, req.System, params)
+	prompt, system := req.Prompt, req.System
+	if instruction, ok, err := structuredFormatInstruction(req.Format); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if ok {
+		system = appendInstruction(system, instruction)
+	}
+	result, err := h.inference.Generate(r.Context(), req.Model, prompt, system, params)
 	if err != nil {
 		slog.Error("generate failed", "error", err)
 		writeRuntimeError(w, err)
+		return
+	}
+	if err := validateStructuredOutput(req.Format, result.Text); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	h.inference.ApplyKeepAlive(req.KeepAlive)
@@ -329,9 +344,6 @@ func toEngineParamsFromGenerate(req *model.GenerateRequest) engine.CompletionPar
 }
 
 func validateGenerateRequest(req *model.GenerateRequest) error {
-	if hasMeaningfulRawJSON(req.Format) {
-		return fmt.Errorf("format is not supported yet")
-	}
 	if req.Template != "" {
 		return fmt.Errorf("template is not supported yet")
 	}

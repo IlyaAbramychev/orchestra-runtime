@@ -43,6 +43,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   with digest verification and manifest metadata layers.
 - `/api/create` supports metadata-only derived models from an existing `from`
   model. It updates registry metadata and shares the base GGUF artifact.
+- `/api/chat` and `/api/generate` accept Ollama's `format` for non-streaming
+  structured output. The runtime steers the prompt and validates that the final
+  response is valid JSON; grammar-constrained decoding is not implemented yet.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -57,7 +60,7 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 2. Advanced request parity
    - Chat tool calls.
    - Multimodal `images`.
-   - Structured output via `format`.
+   - Streaming structured output and grammar-constrained JSON/schema decoding.
    - Thinking model controls.
 
 3. Operational maturity
