@@ -169,6 +169,7 @@ func (s *Server) buildRouter(
 		r.Post("/api/show", modelsH.Show)
 		r.Delete("/api/delete", modelsH.DeleteOllama)
 		r.Post("/api/copy", modelsH.CopyOllama)
+		r.Post("/api/create", modelsH.CreateOllama)
 		r.Post("/api/pull", modelsH.PullOllama)
 		r.Get("/api/version", systemH.Version)
 

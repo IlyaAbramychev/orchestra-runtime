@@ -16,6 +16,7 @@ Implemented:
 - `GET /api/ps`
 - `POST /api/show`
 - `POST /api/copy`
+- `POST /api/create`
 - `DELETE /api/delete`
 - `POST /api/pull`
 - `GET /api/version`
@@ -40,6 +41,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   `/api/show`.
 - Ollama registry manifest/blob pull flow is covered by recorded fixture tests
   with digest verification and manifest metadata layers.
+- `/api/create` supports metadata-only derived models from an existing `from`
+  model. It updates registry metadata and shares the base GGUF artifact.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -48,7 +51,6 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 ## Next Milestones
 
 1. Additional lifecycle endpoints
-   - `POST /api/create`
    - `POST /api/push` only if Operium needs publishing.
    - Blob endpoints only if full Ollama manifest support requires them.
 

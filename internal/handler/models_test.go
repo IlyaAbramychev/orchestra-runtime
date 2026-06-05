@@ -437,6 +437,79 @@ func TestCopyOllamaCreatesModelAlias(t *testing.T) {
 	}
 }
 
+func TestCreateOllamaCreatesDerivedModelMetadata(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:           "base-id",
+		Name:         "base:latest",
+		Filename:     "base.gguf",
+		Status:       "ready",
+		Family:       "llama",
+		Parameters:   "7B",
+		Quantization: "Q4_K_M",
+		SourceURL:    "ollama://base:latest",
+		SHA256:       strings.Repeat("b", 64),
+		FilePath:     tmp + "/base.gguf",
+		DownloadedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, tmp)
+	handler := NewModelsHandler(manager, backend)
+
+	body := `{
+		"model":"derived:latest",
+		"from":"base:latest",
+		"template":"{{ .System }} {{ .Prompt }}",
+		"system":"Use short answers.",
+		"parameters":{"temperature":0.2,"stop":["<|derived|>"]},
+		"license":["MIT"],
+		"stream":false
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/create", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handler.CreateOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	derived, err := manager.ResolveModel("derived:latest")
+	if err != nil {
+		t.Fatalf("resolve derived model: %v", err)
+	}
+	if derived.ID == "base-id" {
+		t.Fatal("expected derived model to have a new id")
+	}
+	if derived.FilePath != tmp+"/base.gguf" || derived.SHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("base artifact metadata not reused: %+v", derived)
+	}
+	if derived.Template != "{{ .System }} {{ .Prompt }}" {
+		t.Fatalf("template = %q", derived.Template)
+	}
+	if derived.System != "Use short answers." {
+		t.Fatalf("system = %q", derived.System)
+	}
+	if derived.OllamaParameters != "PARAMETER stop \"<|derived|>\"\nPARAMETER temperature 0.2" {
+		t.Fatalf("ollama parameters = %q", derived.OllamaParameters)
+	}
+	if len(derived.StopTokens) != 1 || derived.StopTokens[0] != "<|derived|>" {
+		t.Fatalf("stop tokens = %#v", derived.StopTokens)
+	}
+	if len(derived.License) != 1 || derived.License[0] != "MIT" {
+		t.Fatalf("license = %#v", derived.License)
+	}
+	if !strings.Contains(derived.Modelfile, "FROM base:latest") || !strings.Contains(derived.Modelfile, "SYSTEM") {
+		t.Fatalf("modelfile = %q", derived.Modelfile)
+	}
+}
+
 func TestPullOllamaNonStreamDownloadsDirectGGUF(t *testing.T) {
 	tmp := t.TempDir()
 	registry, err := storage.NewModelRegistry(tmp)

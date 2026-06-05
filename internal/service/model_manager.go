@@ -53,6 +53,13 @@ type PullModelMetadata struct {
 	RecommendedSettings *storage.RecommendedModelSettings
 }
 
+type CreateModelMetadata struct {
+	Template   string
+	System     string
+	Parameters map[string]any
+	License    []string
+}
+
 // ModelManager handles model CRUD and lifecycle.
 type ModelManager struct {
 	registry           *storage.ModelRegistry
@@ -218,6 +225,60 @@ func (m *ModelManager) CopyModel(source, destination string) (string, error) {
 	}
 	if err := m.registry.Add(entry); err != nil {
 		return "", fmt.Errorf("add copied model: %w", err)
+	}
+	return entry.ID, nil
+}
+
+// CreateModelFromBase creates a derived local model entry from an existing model.
+// It updates registry metadata only; the underlying GGUF artifact is shared with
+// the base model because Orchestra Runtime does not rebuild GGUF files.
+func (m *ModelManager) CreateModelFromBase(name, from string, metadata CreateModelMetadata) (string, error) {
+	name = strings.TrimSpace(name)
+	from = strings.TrimSpace(from)
+	if name == "" {
+		return "", fmt.Errorf("model is required")
+	}
+	if from == "" {
+		return "", fmt.Errorf("from is required")
+	}
+
+	base, err := m.ResolveModel(from)
+	if err != nil {
+		return "", err
+	}
+	if _, err := m.ResolveModel(name); err == nil {
+		return "", fmt.Errorf("model %s already exists", name)
+	}
+
+	entry := cloneModelEntry(base)
+	entry.ID = uuid.New().String()
+	entry.Name = name
+	entry.SourceURL = "ollama://" + name
+	entry.StopTokens = append([]string(nil), base.StopTokens...)
+	entry.License = append([]string(nil), base.License...)
+	entry.DownloadedAt = time.Now().UTC()
+	if entry.Status == "loaded" {
+		entry.Status = "ready"
+	}
+	if metadata.Template != "" {
+		entry.Template = metadata.Template
+	}
+	if metadata.System != "" {
+		entry.System = metadata.System
+	}
+	if len(metadata.Parameters) > 0 {
+		entry.OllamaParameters = renderOllamaParameters(metadata.Parameters)
+		if stopTokens := extractStopTokens(metadata.Parameters["stop"]); len(stopTokens) > 0 {
+			entry.StopTokens = stopTokens
+		}
+	}
+	if len(metadata.License) > 0 {
+		entry.License = append([]string(nil), metadata.License...)
+	}
+	entry.Modelfile = buildOllamaModelfile(ollamaRegistryRef{Name: from}, entry.Template, entry.System, entry.OllamaParameters, entry.License)
+
+	if err := m.registry.Add(entry); err != nil {
+		return "", fmt.Errorf("add created model: %w", err)
 	}
 	return entry.ID, nil
 }

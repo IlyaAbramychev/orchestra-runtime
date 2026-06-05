@@ -231,6 +231,115 @@ func (h *ModelsHandler) CopyOllama(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// CreateOllama handles POST /api/create (Ollama-compat).
+//
+// This endpoint creates a derived local registry entry from an existing model.
+// It supports Modelfile-style metadata fields but does not rebuild GGUF files.
+func (h *ModelsHandler) CreateOllama(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model      string         `json:"model"`
+		Name       string         `json:"name"`
+		From       string         `json:"from"`
+		Template   string         `json:"template"`
+		System     string         `json:"system"`
+		Parameters map[string]any `json:"parameters"`
+		License    any            `json:"license"`
+		Stream     *bool          `json:"stream"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	name := firstNonEmptyString(req.Model, req.Name)
+	metadata := service.CreateModelMetadata{
+		Template:   req.Template,
+		System:     req.System,
+		Parameters: req.Parameters,
+		License:    normalizeCreateLicense(req.License),
+	}
+	stream := true
+	if req.Stream != nil {
+		stream = *req.Stream
+	}
+	if stream {
+		h.streamOllamaCreate(w, r, name, req.From, metadata)
+		return
+	}
+	if _, err := h.manager.CreateModelFromBase(name, req.From, metadata); err != nil {
+		writeCreateError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, model.OllamaPullResponse{Status: "success"})
+}
+
+func (h *ModelsHandler) streamOllamaCreate(
+	w http.ResponseWriter,
+	r *http.Request,
+	name string,
+	from string,
+	metadata service.CreateModelMetadata,
+) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "reading model metadata"})
+	if _, err := h.manager.CreateModelFromBase(name, from, metadata); err != nil {
+		writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "writing manifest"})
+	writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{Status: "success"})
+}
+
+func writeCreateError(w http.ResponseWriter, err error) {
+	switch {
+	case strings.Contains(err.Error(), "is required"):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case strings.Contains(err.Error(), "not found"):
+		writeError(w, http.StatusNotFound, err.Error())
+	case strings.Contains(err.Error(), "already exists"):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+func normalizeCreateLicense(value any) []string {
+	switch v := value.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []string{v}
+	case []any:
+		licenses := make([]string, 0, len(v))
+		for _, item := range v {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				licenses = append(licenses, text)
+			}
+		}
+		return licenses
+	default:
+		return nil
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func normalizeDirectOllamaPullRequest(req *model.OllamaPullRequest) (bool, string, string, error) {
 	name := strings.TrimSpace(req.Model)
 	sourceURL := strings.TrimSpace(req.SourceURL)
