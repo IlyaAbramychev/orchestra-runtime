@@ -53,6 +53,10 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "messages is required")
 		return
 	}
+	if hasOllamaChatImages(req.Messages) {
+		writeError(w, http.StatusBadRequest, "multimodal images are not supported yet")
+		return
+	}
 
 	stream := true
 	if req.Stream != nil {
@@ -279,6 +283,15 @@ func ollamaToChatCompletionRequest(req *model.OllamaChatRequest) *model.ChatComp
 	out.MirostatEta = o.MirostatEta
 	out.Stop = o.Stop
 	return out
+}
+
+func hasOllamaChatImages(messages []model.ChatMessage) bool {
+	for _, msg := range messages {
+		if len(msg.Images) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *model.ChatCompletionRequest) {

@@ -353,6 +353,9 @@ func validateGenerateRequest(req *model.GenerateRequest) error {
 	if req.Suffix != "" {
 		return fmt.Errorf("suffix is not supported yet")
 	}
+	if len(req.Images) > 0 {
+		return fmt.Errorf("multimodal images are not supported yet")
+	}
 	return nil
 }
 

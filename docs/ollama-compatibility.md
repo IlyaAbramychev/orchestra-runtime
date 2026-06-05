@@ -49,6 +49,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - `/api/chat` accepts Ollama `tools` in non-streaming mode and returns parsed
   `message.tool_calls`. Tool execution remains the client's responsibility;
   streaming tool-call deltas are not implemented yet.
+- `/api/chat` message `images` and `/api/generate` `images` are recognized and
+  rejected with a clear unsupported-feature error instead of being silently
+  ignored.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -62,7 +65,7 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 
 2. Advanced request parity
    - Streaming tool-call deltas and tool-result lifecycle hardening.
-   - Multimodal `images`.
+   - Multimodal inference with image embeddings and mmproj loading.
    - Streaming structured output and grammar-constrained JSON/schema decoding.
    - Thinking model controls.
 

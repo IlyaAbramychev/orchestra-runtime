@@ -231,6 +231,19 @@ func TestOllamaChatToolsRejectStreaming(t *testing.T) {
 	}
 }
 
+func TestOllamaChatImagesRejectUnsupported(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"messages":[{"role":"user","content":"what is this?","images":["aGVsbG8="]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOllamaChatToolCallsRejectUnknownTool(t *testing.T) {
 	backend := &fakeChatBackend{completeText: `{"tool_calls":[{"function":{"name":"delete_everything","arguments":{}}}]}`}
 	h := NewChatHandler(service.NewInferenceService(backend, 1))

@@ -36,6 +36,7 @@ type ChatCompletionRequest struct {
 type ChatMessage struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
+	Images    []string   `json:"images,omitempty"`
 	Thinking  string     `json:"thinking,omitempty"`
 	ToolName  string     `json:"tool_name,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`

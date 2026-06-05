@@ -19,6 +19,7 @@ func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 	cases := []string{
 		`{"model":"test","prompt":"hi","template":"{{ .Prompt }}"}`,
 		`{"model":"test","prompt":"hi","context":[1,2,3]}`,
+		`{"model":"test","prompt":"hi","images":["aGVsbG8="]}`,
 		`{"model":"test","prompt":"hi","suffix":"end"}`,
 	}
 	for _, body := range cases {

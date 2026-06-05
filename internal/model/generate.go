@@ -18,6 +18,7 @@ type GenerateRequest struct {
 	Format   json.RawMessage `json:"format,omitempty"`
 	Template string          `json:"template,omitempty"`
 	Context  []int           `json:"context,omitempty"`
+	Images   []string        `json:"images,omitempty"`
 	Suffix   string          `json:"suffix,omitempty"`
 
 	// Mirrors ChatCompletionRequest sampling.
