@@ -169,7 +169,15 @@ func structuredFormatGrammar(raw json.RawMessage) (string, bool, error) {
 		}
 		return jsonObjectGrammar, true, nil
 	case map[string]any:
-		return jsonValueGrammar, true, nil
+		schema, err := json.Marshal(v)
+		if err != nil {
+			return "", false, fmt.Errorf("format schema is invalid")
+		}
+		grammar, err := engine.JSONSchemaToGrammar(string(schema))
+		if err != nil {
+			return "", false, fmt.Errorf("format schema is invalid: %w", err)
+		}
+		return grammar, true, nil
 	default:
 		return "", false, fmt.Errorf("format must be \"json\" or a JSON schema object")
 	}
@@ -230,31 +238,6 @@ func validateJSONSchema(schemaRaw json.RawMessage, output string) error {
 }
 
 const jsonObjectGrammar = `root   ::= object
-value  ::= object | array | string | number | ("true" | "false" | "null") ws
-
-object ::=
-  "{" ws (
-            string ":" ws value
-    ("," ws string ":" ws value)*
-  )? "}" ws
-
-array  ::=
-  "[" ws (
-            value
-    ("," ws value)*
-  )? "]" ws
-
-string ::=
-  "\"" (
-    [^"\\\x7F\x00-\x1F] |
-    "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4})
-  )* "\"" ws
-
-number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
-
-ws ::= | " " | "\n" [ \t]{0,20}`
-
-const jsonValueGrammar = `root   ::= value
 value  ::= object | array | string | number | ("true" | "false" | "null") ws
 
 object ::=

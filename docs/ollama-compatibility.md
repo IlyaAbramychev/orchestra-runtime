@@ -44,10 +44,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - `/api/create` supports metadata-only derived models from an existing `from`
   model. It updates registry metadata and shares the base GGUF artifact.
 - `/api/chat` and `/api/generate` accept Ollama's `format` for structured
-  output. The runtime steers the prompt, applies a generic JSON GBNF grammar
-  during decoding, and validates that the final response is valid JSON and
-  conforms to the requested JSON Schema when a schema object is provided.
-  Schema-specific JSON Schema to GBNF conversion is not implemented yet.
+  output. The runtime steers the prompt, converts JSON Schema objects to GBNF
+  with llama.cpp's converter, applies the grammar during decoding, and validates
+  that the final response is valid JSON and conforms to the requested schema.
 - `/api/chat` accepts Ollama `tools` in non-streaming mode and returns parsed
   `message.tool_calls`. Tool execution remains the client's responsibility;
   streaming tool calls are supported as buffered NDJSON responses, not
@@ -81,7 +80,7 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
    - Token-level streaming tool-call/thinking deltas and tool-result lifecycle
      hardening.
    - Multimodal inference with image embeddings and mmproj loading.
-   - Schema-specific JSON Schema to GBNF conversion.
+   - Broader JSON Schema compatibility fixtures against Ollama clients.
    - Backend-level thinking controls.
 
 3. Operational maturity

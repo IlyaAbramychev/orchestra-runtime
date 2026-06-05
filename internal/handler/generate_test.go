@@ -72,7 +72,8 @@ func TestGenerateFormatJSONRejectsInvalidModelOutput(t *testing.T) {
 }
 
 func TestGenerateFormatSchemaRejectsNonConformingOutput(t *testing.T) {
-	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{completeText: `{"answer":123}`}, 1))
+	backend := &fakeChatBackend{completeText: `{"answer":123}`}
+	h := NewGenerateHandler(service.NewInferenceService(backend, 1))
 	body := bytes.NewBufferString(`{
 		"model":"test",
 		"prompt":"hi",
@@ -90,6 +91,9 @@ func TestGenerateFormatSchemaRejectsNonConformingOutput(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains([]byte(backend.lastParams.Grammar), []byte("answer")) {
+		t.Fatalf("expected schema-specific grammar to include property name, got:\n%s", backend.lastParams.Grammar)
 	}
 }
 

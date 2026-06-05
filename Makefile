@@ -70,19 +70,23 @@ llama-cpu:
 # Detect llama.cpp library paths (cmake output structure varies)
 LLAMA_LIB_DIR = $(LLAMA_DIR)/build/src
 GGML_LIB_DIR = $(LLAMA_DIR)/build/ggml/src
+COMMON_LIB_DIR = $(LLAMA_DIR)/build/common
 GGML_METAL_DIR = $(LLAMA_DIR)/build/ggml/src/ggml-metal
 GGML_BLAS_DIR = $(LLAMA_DIR)/build/ggml/src/ggml-blas
 
 LLAMA_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/include
 LLAMA_LIB = $(shell pwd)/$(LLAMA_LIB_DIR)
+COMMON_LIB = $(shell pwd)/$(COMMON_LIB_DIR)
 GGML_LIB = $(shell pwd)/$(GGML_LIB_DIR)
 GGML_METAL = $(shell pwd)/$(GGML_METAL_DIR)
 GGML_BLAS = $(shell pwd)/$(GGML_BLAS_DIR)
 
 GGML_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/ggml/include
-BASE_CGO = CGO_ENABLED=1 CGO_CFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE)"
-BASE_LDFLAGS = -L$(LLAMA_LIB) -L$(GGML_LIB) -lllama -lggml -lstdc++ -lm
-METAL_LDFLAGS = -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
+COMMON_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/common
+VENDOR_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/vendor
+BASE_CGO = CGO_ENABLED=1 CGO_CFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE)" CGO_CXXFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE) -I$(COMMON_INCLUDE) -I$(VENDOR_INCLUDE)"
+BASE_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -lcommon -lllama -lggml -lstdc++ -lm
+METAL_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lcommon -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 TEST_LDFLAGS = $(BASE_LDFLAGS)
 ifeq ($(shell uname -s),Darwin)
 TEST_LDFLAGS = $(METAL_LDFLAGS)

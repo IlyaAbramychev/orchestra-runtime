@@ -90,7 +90,7 @@ func (h *SystemHandler) Capabilities(w http.ResponseWriter, r *http.Request) {
 			{Name: "thinking_non_streaming", Status: "partial", Notes: "separates <think>...</think> output; backend-level thinking control is not implemented"},
 			{Name: "thinking_streaming", Status: "partial", Notes: "buffered stream; separates <think>...</think> output after generation completes"},
 			{Name: "multimodal_images", Status: "unsupported"},
-			{Name: "grammar_constrained_decoding", Status: "partial", Notes: "generic JSON GBNF for Ollama format; schema-specific grammar conversion is not implemented yet"},
+			{Name: "grammar_constrained_decoding", Status: "supported", Notes: "Ollama format uses llama.cpp JSON Schema to GBNF conversion"},
 		},
 	})
 }

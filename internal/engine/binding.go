@@ -2,7 +2,8 @@ package engine
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include
-#cgo LDFLAGS: -lllama -lggml -lstdc++ -lm
+#cgo CXXFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/common -I${SRCDIR}/../../llama.cpp/vendor
+#cgo LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/common -lcommon -lllama -lggml -lstdc++ -lm
 #cgo darwin LDFLAGS: -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 #include "llama_bridge.h"
 #include <stdlib.h>
@@ -26,6 +27,25 @@ func llamaBackendInit() {
 
 func llamaBackendFree() {
 	C.llama_backend_free()
+}
+
+// JSONSchemaToGrammar converts a JSON Schema document to llama.cpp GBNF using
+// the vendored llama.cpp converter. The returned grammar is suitable for
+// llama_sampler_init_grammar.
+func JSONSchemaToGrammar(schema string) (string, error) {
+	cSchema := C.CString(schema)
+	defer C.free(unsafe.Pointer(cSchema))
+
+	result := C.bridge_json_schema_to_grammar(cSchema)
+	defer C.bridge_schema_grammar_result_free(result)
+
+	if result.error != nil {
+		return "", fmt.Errorf("convert JSON schema to grammar: %s", C.GoString(result.error))
+	}
+	if result.grammar == nil {
+		return "", fmt.Errorf("convert JSON schema to grammar: empty result")
+	}
+	return C.GoString(result.grammar), nil
 }
 
 // --- Model ---

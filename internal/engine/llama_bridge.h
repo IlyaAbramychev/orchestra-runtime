@@ -60,4 +60,20 @@ static inline char *bridge_chat_apply_template(
     return buf;
 }
 
+typedef struct bridge_schema_grammar_result {
+    char *grammar;
+    char *error;
+} bridge_schema_grammar_result;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+bridge_schema_grammar_result bridge_json_schema_to_grammar(const char *schema_json);
+void bridge_schema_grammar_result_free(bridge_schema_grammar_result result);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif // LLAMA_BRIDGE_H
