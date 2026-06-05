@@ -11,6 +11,7 @@ package engine
 import "C"
 import (
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -365,12 +366,15 @@ type SamplerOpts struct {
 	MirostatEta      float32
 	Seed             uint32
 	NVocab           int32 // required for penalty samplers
+	Vocab            *llamaVocab
+	Grammar          string
 }
 
 // NewSamplerChain composes the full llama.cpp sampler chain. Order matters:
-// repetition penalties → truncation (top_k/top_p/min_p/typical) → temperature
-// → mirostat (or dist). See llama.cpp/examples/main/main.cpp for reference.
-func NewSamplerChain(o SamplerOpts) *llamaSampler {
+// repetition penalties → grammar constraints → truncation
+// (top_k/top_p/min_p/typical) → temperature → mirostat (or dist). See
+// llama.cpp/examples/main/main.cpp for reference.
+func NewSamplerChain(o SamplerOpts) (*llamaSampler, error) {
 	chainParams := C.llama_sampler_chain_default_params()
 	chain := C.llama_sampler_chain_init(chainParams)
 
@@ -390,6 +394,23 @@ func NewSamplerChain(o SamplerOpts) *llamaSampler {
 			C.float(o.FrequencyPenalty),
 			C.float(o.PresencePenalty),
 		))
+	}
+
+	if grammar := strings.TrimSpace(o.Grammar); grammar != "" {
+		if o.Vocab == nil || o.Vocab.ptr == nil {
+			C.llama_sampler_free(chain)
+			return nil, fmt.Errorf("grammar-constrained decoding requires a loaded vocab")
+		}
+		cGrammar := C.CString(grammar)
+		cRoot := C.CString("root")
+		grammarSampler := C.llama_sampler_init_grammar(o.Vocab.ptr, cGrammar, cRoot)
+		C.free(unsafe.Pointer(cGrammar))
+		C.free(unsafe.Pointer(cRoot))
+		if grammarSampler == nil {
+			C.llama_sampler_free(chain)
+			return nil, fmt.Errorf("invalid grammar for constrained decoding")
+		}
+		C.llama_sampler_chain_add(chain, grammarSampler)
 	}
 
 	// Mirostat replaces top_k/top_p entirely — skip truncation if enabled.
@@ -430,13 +451,15 @@ func NewSamplerChain(o SamplerOpts) *llamaSampler {
 		if o.MinP > 0 {
 			C.llama_sampler_chain_add(chain, C.llama_sampler_init_min_p(C.float(o.MinP), 1))
 		}
-		if o.Temp > 0 {
+		if o.Temp <= 0 {
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_greedy())
+		} else {
 			C.llama_sampler_chain_add(chain, C.llama_sampler_init_temp(C.float(o.Temp)))
+			C.llama_sampler_chain_add(chain, C.llama_sampler_init_dist(C.uint32_t(o.Seed)))
 		}
-		C.llama_sampler_chain_add(chain, C.llama_sampler_init_dist(C.uint32_t(o.Seed)))
 	}
 
-	return &llamaSampler{ptr: chain}
+	return &llamaSampler{ptr: chain}, nil
 }
 
 // NewGreedySampler creates a greedy (argmax) sampler.

@@ -78,6 +78,12 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		chatReq.Messages = withStructuredInstruction(chatReq.Messages, instruction)
 	}
+	if grammar, ok, err := structuredFormatGrammar(req.Format); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if ok {
+		chatReq.Grammar = grammar
+	}
 	if instruction, ok, err := toolCallInstruction(req.Tools); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

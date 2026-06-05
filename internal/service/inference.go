@@ -277,5 +277,6 @@ func toEngineParams(req *model.ChatCompletionRequest) engine.CompletionParams {
 	if len(req.Stop) > 0 {
 		params.Stop = req.Stop
 	}
+	params.Grammar = req.Grammar
 	return params
 }

@@ -405,6 +405,7 @@ func toEngineParams(p rpc.CompletionParams) engine.CompletionParams {
 		MirostatEta:      p.MirostatEta,
 		Stop:             p.Stop,
 		RawPrompt:        p.RawPrompt,
+		Grammar:          p.Grammar,
 	}
 }
 

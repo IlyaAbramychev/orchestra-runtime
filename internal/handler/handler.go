@@ -154,6 +154,27 @@ func structuredFormatInstruction(raw json.RawMessage) (string, bool, error) {
 	}
 }
 
+func structuredFormatGrammar(raw json.RawMessage) (string, bool, error) {
+	if !hasMeaningfulRawJSON(raw) {
+		return "", false, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false, fmt.Errorf("format must be \"json\" or a JSON schema object")
+	}
+	switch v := value.(type) {
+	case string:
+		if v != "json" {
+			return "", false, fmt.Errorf("format string must be \"json\"")
+		}
+		return jsonObjectGrammar, true, nil
+	case map[string]any:
+		return jsonValueGrammar, true, nil
+	default:
+		return "", false, fmt.Errorf("format must be \"json\" or a JSON schema object")
+	}
+}
+
 func validateStructuredOutput(raw json.RawMessage, text string) error {
 	if !hasMeaningfulRawJSON(raw) {
 		return nil
@@ -207,6 +228,56 @@ func validateJSONSchema(schemaRaw json.RawMessage, output string) error {
 	}
 	return nil
 }
+
+const jsonObjectGrammar = `root   ::= object
+value  ::= object | array | string | number | ("true" | "false" | "null") ws
+
+object ::=
+  "{" ws (
+            string ":" ws value
+    ("," ws string ":" ws value)*
+  )? "}" ws
+
+array  ::=
+  "[" ws (
+            value
+    ("," ws value)*
+  )? "]" ws
+
+string ::=
+  "\"" (
+    [^"\\\x7F\x00-\x1F] |
+    "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+  )* "\"" ws
+
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
+
+ws ::= | " " | "\n" [ \t]{0,20}`
+
+const jsonValueGrammar = `root   ::= value
+value  ::= object | array | string | number | ("true" | "false" | "null") ws
+
+object ::=
+  "{" ws (
+            string ":" ws value
+    ("," ws string ":" ws value)*
+  )? "}" ws
+
+array  ::=
+  "[" ws (
+            value
+    ("," ws value)*
+  )? "]" ws
+
+string ::=
+  "\"" (
+    [^"\\\x7F\x00-\x1F] |
+    "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+  )* "\"" ws
+
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
+
+ws ::= | " " | "\n" [ \t]{0,20}`
 
 func collectCompletionStream(ch <-chan engine.CompletionChunk) (string, engine.CompletionChunk, error) {
 	var text strings.Builder

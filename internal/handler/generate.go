@@ -50,6 +50,12 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	params := toEngineParamsFromGenerate(&req)
+	if grammar, ok, err := structuredFormatGrammar(req.Format); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if ok {
+		params.Grammar = grammar
+	}
 	if stream {
 		if shouldBufferOllamaGenerateStream(&req) {
 			h.handleBufferedStream(w, r, &req, params)

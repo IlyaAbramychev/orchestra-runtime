@@ -61,6 +61,8 @@ type CompletionParams struct {
 	// ChatTemplate overrides the model's built-in llama.cpp chat template.
 	// Empty string means use the GGUF embedded template.
 	ChatTemplate string
+	// Grammar is an optional llama.cpp GBNF grammar used to constrain decoding.
+	Grammar string
 	/** Raw prompt mode skips the chat template and sends bytes as-is. Used
 	 *  for POST /api/generate to allow raw completion-style prompts. */
 	RawPrompt bool
@@ -196,7 +198,10 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	promptEvalNs := time.Since(promptStart).Nanoseconds()
 
 	// Create sampler
-	sampler := e.createSampler(params)
+	sampler, err := e.createSampler(params)
+	if err != nil {
+		return nil, err
+	}
 	defer sampler.Free()
 
 	// Generate tokens (measure: eval duration)
@@ -361,7 +366,11 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		}
 		promptEvalNs := time.Since(promptStart).Nanoseconds()
 
-		sampler := e.createSampler(params)
+		sampler, err := e.createSampler(params)
+		if err != nil {
+			ch <- CompletionChunk{Err: err}
+			return
+		}
 		defer sampler.Free()
 
 		// Generation loop (measure: eval duration)
@@ -497,10 +506,10 @@ func buildChatMLPrompt(messages []ChatMessage) string {
 	return prompt
 }
 
-func (e *Engine) createSampler(params CompletionParams) *llamaSampler {
+func (e *Engine) createSampler(params CompletionParams) (*llamaSampler, error) {
 	// Greedy sampler bypasses the whole chain — fastest, fully deterministic.
-	if params.Temperature <= 0 && params.Mirostat == 0 {
-		return NewGreedySampler()
+	if params.Grammar == "" && params.Temperature <= 0 && params.Mirostat == 0 {
+		return NewGreedySampler(), nil
 	}
 	seed := uint32(params.Seed)
 	if params.Seed < 0 {
@@ -525,6 +534,8 @@ func (e *Engine) createSampler(params CompletionParams) *llamaSampler {
 		MirostatEta:      params.MirostatEta,
 		Seed:             seed,
 		NVocab:           nVocab,
+		Vocab:            e.vocab,
+		Grammar:          params.Grammar,
 	})
 }
 

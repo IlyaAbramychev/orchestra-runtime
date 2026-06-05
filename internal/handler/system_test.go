@@ -77,4 +77,7 @@ func TestCapabilitiesReportsFeatureSupport(t *testing.T) {
 	if features["direct_gguf_pull"] != "extension" {
 		t.Fatalf("direct_gguf_pull = %q", features["direct_gguf_pull"])
 	}
+	if features["grammar_constrained_decoding"] != "partial" {
+		t.Fatalf("grammar_constrained_decoding = %q", features["grammar_constrained_decoding"])
+	}
 }

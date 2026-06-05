@@ -31,6 +31,10 @@ type ChatCompletionRequest struct {
 	// *after* the request completes. Accepts a number of seconds (0 = unload
 	// immediately, negative = keep forever). Matches Ollama's spelling.
 	KeepAlive *int64 `json:"keep_alive,omitempty"`
+
+	// Grammar is an internal transport field for Ollama structured output.
+	// It is not part of the OpenAI-compatible request JSON.
+	Grammar string `json:"-"`
 }
 
 type ChatMessage struct {

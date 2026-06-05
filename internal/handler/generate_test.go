@@ -35,7 +35,8 @@ func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 }
 
 func TestGenerateFormatJSONValidatesResponse(t *testing.T) {
-	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{completeText: `{"answer":"ok"}`}, 1))
+	backend := &fakeChatBackend{completeText: `{"answer":"ok"}`}
+	h := NewGenerateHandler(service.NewInferenceService(backend, 1))
 	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json","stream":false}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
 	rec := httptest.NewRecorder()
@@ -51,6 +52,9 @@ func TestGenerateFormatJSONValidatesResponse(t *testing.T) {
 	}
 	if resp.Response != `{"answer":"ok"}` {
 		t.Fatalf("response = %q", resp.Response)
+	}
+	if backend.lastParams.Grammar == "" {
+		t.Fatal("expected format json to set a constrained decoding grammar")
 	}
 }
 
@@ -90,12 +94,13 @@ func TestGenerateFormatSchemaRejectsNonConformingOutput(t *testing.T) {
 }
 
 func TestGenerateFormatStreamsBuffered(t *testing.T) {
-	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{
+	backend := &fakeChatBackend{
 		streamChunks: []engine.CompletionChunk{
 			{Text: `{"answer":"ok"}`},
 			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
 		},
-	}, 1))
+	}
+	h := NewGenerateHandler(service.NewInferenceService(backend, 1))
 	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","format":"json"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
 	rec := httptest.NewRecorder()
@@ -108,6 +113,9 @@ func TestGenerateFormatStreamsBuffered(t *testing.T) {
 	chunks := decodeGenerateStream(t, rec.Body.Bytes())
 	if len(chunks) != 2 || chunks[0].Response != `{"answer":"ok"}` || !chunks[1].Done {
 		t.Fatalf("unexpected chunks: %+v", chunks)
+	}
+	if backend.lastStreamParams.Grammar == "" {
+		t.Fatal("expected streaming format json to set a constrained decoding grammar")
 	}
 }
 

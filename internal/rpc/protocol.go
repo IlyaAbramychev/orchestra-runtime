@@ -250,6 +250,7 @@ type CompletionParams struct {
 	MirostatEta      float32  `json:"mirostat_eta"`
 	Stop             []string `json:"stop,omitempty"`
 	RawPrompt        bool     `json:"raw_prompt,omitempty"`
+	Grammar          string   `json:"grammar,omitempty"`
 }
 
 type CompleteParams struct {

@@ -416,6 +416,7 @@ func toRPCParams(p engine.CompletionParams) rpc.CompletionParams {
 		MirostatEta:      p.MirostatEta,
 		Stop:             p.Stop,
 		RawPrompt:        p.RawPrompt,
+		Grammar:          p.Grammar,
 	}
 }
 

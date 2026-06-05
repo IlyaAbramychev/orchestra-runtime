@@ -17,13 +17,15 @@ import (
 )
 
 type fakeChatBackend struct {
-	notLoaded    bool
-	completeText string
-	completeErr  error
-	streamErr    error
-	streamChunks []engine.CompletionChunk
-	embedErr     error
-	block        chan struct{}
+	notLoaded        bool
+	completeText     string
+	completeErr      error
+	streamErr        error
+	streamChunks     []engine.CompletionChunk
+	embedErr         error
+	block            chan struct{}
+	lastParams       engine.CompletionParams
+	lastStreamParams engine.CompletionParams
 }
 
 func (f *fakeChatBackend) InitBackend()                                       {}
@@ -35,7 +37,8 @@ func (f *fakeChatBackend) IsLoaded() bool                                     { 
 func (f *fakeChatBackend) LoadedModelID() string                              { return "test" }
 func (f *fakeChatBackend) State() string                                      { return engine.StateReady }
 func (f *fakeChatBackend) ModelDesc() string                                  { return "" }
-func (f *fakeChatBackend) Complete(context.Context, []engine.ChatMessage, engine.CompletionParams) (*engine.CompletionResult, error) {
+func (f *fakeChatBackend) Complete(_ context.Context, _ []engine.ChatMessage, params engine.CompletionParams) (*engine.CompletionResult, error) {
+	f.lastParams = params
 	if f.completeErr != nil {
 		return nil, f.completeErr
 	}
@@ -58,7 +61,8 @@ func (f *fakeChatBackend) Complete(context.Context, []engine.ChatMessage, engine
 		},
 	}, nil
 }
-func (f *fakeChatBackend) CompleteStream(context.Context, []engine.ChatMessage, engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
+func (f *fakeChatBackend) CompleteStream(_ context.Context, _ []engine.ChatMessage, params engine.CompletionParams) (<-chan engine.CompletionChunk, error) {
+	f.lastStreamParams = params
 	if f.streamErr != nil {
 		return nil, f.streamErr
 	}
@@ -121,7 +125,8 @@ func TestOllamaChatNonStreamShape(t *testing.T) {
 }
 
 func TestOllamaChatFormatJSONValidatesResponse(t *testing.T) {
-	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{completeText: `{"answer":"ok"}`}, 1))
+	backend := &fakeChatBackend{completeText: `{"answer":"ok"}`}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
 	body := bytes.NewBufferString(`{"model":"test","stream":false,"format":"json","messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
@@ -137,6 +142,9 @@ func TestOllamaChatFormatJSONValidatesResponse(t *testing.T) {
 	}
 	if resp.Message.Content != `{"answer":"ok"}` {
 		t.Fatalf("content = %q", resp.Message.Content)
+	}
+	if backend.lastParams.Grammar == "" {
+		t.Fatal("expected format json to set a constrained decoding grammar")
 	}
 }
 
@@ -154,12 +162,13 @@ func TestOllamaChatFormatJSONRejectsInvalidModelOutput(t *testing.T) {
 }
 
 func TestOllamaChatFormatStreamsBuffered(t *testing.T) {
-	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+	backend := &fakeChatBackend{
 		streamChunks: []engine.CompletionChunk{
 			{Text: `{"answer":"ok"}`},
 			{Done: true, FinishReason: "stop", PromptTokens: 3, CompletionTokens: 2},
 		},
-	}, 1))
+	}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
 	body := bytes.NewBufferString(`{"model":"test","format":"json","messages":[{"role":"user","content":"hi"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
 	rec := httptest.NewRecorder()
@@ -172,6 +181,9 @@ func TestOllamaChatFormatStreamsBuffered(t *testing.T) {
 	chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
 	if len(chunks) != 2 || chunks[0].Message.Content != `{"answer":"ok"}` || !chunks[1].Done {
 		t.Fatalf("unexpected chunks: %+v", chunks)
+	}
+	if backend.lastStreamParams.Grammar == "" {
+		t.Fatal("expected streaming format json to set a constrained decoding grammar")
 	}
 }
 
