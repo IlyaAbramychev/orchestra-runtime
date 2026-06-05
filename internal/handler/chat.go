@@ -57,10 +57,18 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "multimodal images are not supported yet")
 		return
 	}
+	if err := validateThinkOption(req.Think); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	stream := true
 	if req.Stream != nil {
 		stream = *req.Stream
+	}
+	if stream && hasMeaningfulRawJSON(req.Think) {
+		writeError(w, http.StatusBadRequest, "streaming thinking output is not supported yet")
+		return
 	}
 	if len(req.Tools) > 0 && hasMeaningfulRawJSON(req.Format) {
 		writeError(w, http.StatusBadRequest, "format cannot be combined with tools")
@@ -107,19 +115,21 @@ func (h *ChatHandler) handleOllamaComplete(
 		writeRuntimeError(w, err)
 		return
 	}
-	toolCalls, hasToolCalls, err := parseToolCallsFromText(result.Text, req.Tools)
+	content, thinking := applyThinkingOutput(req.Think, result.Text)
+	toolCalls, hasToolCalls, err := parseToolCallsFromText(content, req.Tools)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if err := validateStructuredOutput(req.Format, result.Text); err != nil {
+	if err := validateStructuredOutput(req.Format, content); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	h.inference.ApplyKeepAlive(req.KeepAlive)
 	message := model.ChatMessage{
-		Role:    "assistant",
-		Content: result.Text,
+		Role:     "assistant",
+		Content:  content,
+		Thinking: thinking,
 	}
 	doneReason := result.FinishReason
 	if hasToolCalls {

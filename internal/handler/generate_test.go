@@ -80,6 +80,39 @@ func TestGenerateFormatRejectsStreaming(t *testing.T) {
 	}
 }
 
+func TestGenerateThinkSeparatesThinking(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{completeText: `<think>reasoning trace</think>final answer`}, 1))
+	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","think":"low","stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.GenerateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Thinking != "reasoning trace" || resp.Response != "final answer" {
+		t.Fatalf("unexpected thinking response: %+v", resp)
+	}
+}
+
+func TestGenerateThinkRejectsStreaming(t *testing.T) {
+	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{"model":"test","prompt":"hi","think":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", body)
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGenerateStreamErrorReturnsDoneErrorChunk(t *testing.T) {
 	backend := &fakeChatBackend{
 		streamChunks: []engine.CompletionChunk{

@@ -52,6 +52,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - `/api/chat` message `images` and `/api/generate` `images` are recognized and
   rejected with a clear unsupported-feature error instead of being silently
   ignored.
+- `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
+  `<think>...</think>` model output into `message.thinking` or `thinking` for
+  non-streaming responses. Streaming thinking output is not implemented yet.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -67,7 +70,7 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
    - Streaming tool-call deltas and tool-result lifecycle hardening.
    - Multimodal inference with image embeddings and mmproj loading.
    - Streaming structured output and grammar-constrained JSON/schema decoding.
-   - Thinking model controls.
+   - Streaming thinking accumulation and backend-level thinking controls.
 
 3. Operational maturity
    - Keep Orchestra extensions additive and avoid changing Ollama field names.

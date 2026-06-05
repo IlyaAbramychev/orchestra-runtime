@@ -177,6 +177,70 @@ func validateStructuredOutput(raw json.RawMessage, text string) error {
 	return nil
 }
 
+func validateThinkOption(raw json.RawMessage) error {
+	if !hasMeaningfulRawJSON(raw) {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return fmt.Errorf("think must be a boolean or one of \"low\", \"medium\", \"high\"")
+	}
+	switch v := value.(type) {
+	case bool:
+		return nil
+	case string:
+		switch v {
+		case "low", "medium", "high":
+			return nil
+		default:
+			return fmt.Errorf("think must be a boolean or one of \"low\", \"medium\", \"high\"")
+		}
+	default:
+		return fmt.Errorf("think must be a boolean or one of \"low\", \"medium\", \"high\"")
+	}
+}
+
+func applyThinkingOutput(raw json.RawMessage, text string) (content string, thinking string) {
+	thinking, content, ok := splitThinkingTags(text)
+	if !ok {
+		return text, ""
+	}
+	if thinkDisabled(raw) {
+		return content, ""
+	}
+	return content, thinking
+}
+
+func splitThinkingTags(text string) (thinking string, content string, ok bool) {
+	lower := strings.ToLower(text)
+	start := strings.Index(lower, "<think>")
+	if start < 0 {
+		return "", text, false
+	}
+	bodyStart := start + len("<think>")
+	relEnd := strings.Index(lower[bodyStart:], "</think>")
+	if relEnd < 0 {
+		return "", text, false
+	}
+	end := bodyStart + relEnd
+	afterStart := end + len("</think>")
+
+	thinking = strings.TrimSpace(text[bodyStart:end])
+	content = strings.TrimSpace(text[:start] + text[afterStart:])
+	return thinking, content, true
+}
+
+func thinkDisabled(raw json.RawMessage) bool {
+	if !hasMeaningfulRawJSON(raw) {
+		return false
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	return !value
+}
+
 func withStructuredInstruction(messages []model.ChatMessage, instruction string) []model.ChatMessage {
 	out := append([]model.ChatMessage(nil), messages...)
 	for i := range out {

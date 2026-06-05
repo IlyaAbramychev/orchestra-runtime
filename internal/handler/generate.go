@@ -38,11 +38,19 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validateThinkOption(req.Think); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Ollama default: stream unless explicitly disabled.
 	stream := true
 	if req.Stream != nil {
 		stream = *req.Stream
+	}
+	if stream && hasMeaningfulRawJSON(req.Think) {
+		writeError(w, http.StatusBadRequest, "streaming thinking output is not supported yet")
+		return
 	}
 	if stream && hasMeaningfulRawJSON(req.Format) {
 		writeError(w, http.StatusBadRequest, "streaming structured output is not supported yet")
@@ -199,7 +207,8 @@ func (h *GenerateHandler) handleComplete(
 		writeRuntimeError(w, err)
 		return
 	}
-	if err := validateStructuredOutput(req.Format, result.Text); err != nil {
+	content, thinking := applyThinkingOutput(req.Think, result.Text)
+	if err := validateStructuredOutput(req.Format, content); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -207,7 +216,8 @@ func (h *GenerateHandler) handleComplete(
 
 	resp := model.GenerateResponse{
 		Model:                req.Model,
-		Response:             result.Text,
+		Response:             content,
+		Thinking:             thinking,
 		Done:                 true,
 		CreatedAt:            time.Now().UTC().Format(time.RFC3339Nano),
 		TotalDurationNs:      result.Timings.TotalNs,

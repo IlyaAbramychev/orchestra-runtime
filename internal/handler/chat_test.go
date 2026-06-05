@@ -166,6 +166,39 @@ func TestOllamaChatFormatRejectsStreaming(t *testing.T) {
 	}
 }
 
+func TestOllamaChatThinkSeparatesThinking(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{completeText: `<think>reasoning trace</think>final answer`}, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"think":true,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OllamaChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Message.Thinking != "reasoning trace" || resp.Message.Content != "final answer" {
+		t.Fatalf("unexpected thinking response: %+v", resp.Message)
+	}
+}
+
+func TestOllamaChatThinkRejectsStreaming(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{"model":"test","think":true,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOllamaChatToolCallsResponseShape(t *testing.T) {
 	backend := &fakeChatBackend{completeText: `{"tool_calls":[{"type":"function","function":{"name":"get_weather","arguments":{"city":"Paris"}}}]}`}
 	h := NewChatHandler(service.NewInferenceService(backend, 1))

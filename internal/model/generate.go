@@ -16,6 +16,7 @@ type GenerateRequest struct {
 	System string `json:"system,omitempty"`
 
 	Format   json.RawMessage `json:"format,omitempty"`
+	Think    json.RawMessage `json:"think,omitempty"`
 	Template string          `json:"template,omitempty"`
 	Context  []int           `json:"context,omitempty"`
 	Images   []string        `json:"images,omitempty"`
@@ -49,6 +50,7 @@ type GenerateOptions struct {
 type GenerateResponse struct {
 	Model    string `json:"model"`
 	Response string `json:"response"`
+	Thinking string `json:"thinking,omitempty"`
 	// `done == true` marks the final chunk and carries the aggregate timings.
 	Done      bool   `json:"done"`
 	CreatedAt string `json:"created_at"`

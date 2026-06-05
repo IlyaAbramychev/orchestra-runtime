@@ -49,6 +49,7 @@ type OllamaChatRequest struct {
 	Model     string           `json:"model"`
 	Messages  []ChatMessage    `json:"messages"`
 	Stream    *bool            `json:"stream,omitempty"`
+	Think     json.RawMessage  `json:"think,omitempty"`
 	Format    json.RawMessage  `json:"format,omitempty"`
 	Tools     []ToolDefinition `json:"tools,omitempty"`
 	Options   *GenerateOptions `json:"options,omitempty"`
