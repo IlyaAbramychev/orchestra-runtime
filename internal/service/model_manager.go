@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -784,6 +785,15 @@ func (m *ModelManager) ImportFromDirectory(dir string) ([]*storage.ModelEntry, e
 		// .../author/model-name/file.gguf  →  "author/model-name"
 		name := deriveModelName(absDir, path, filename)
 
+		discovery := discoverMMProjFilename(path)
+		if len(discovery.ambiguous) > 0 {
+			slog.Warn("multiple mmproj files found while importing model; manual selection required",
+				"name", name,
+				"model_path", path,
+				"mmproj_candidates", discovery.ambiguous,
+			)
+		}
+
 		entry := &storage.ModelEntry{
 			ID:                  uuid.New().String(),
 			Name:                name,
@@ -794,7 +804,7 @@ func (m *ModelManager) ImportFromDirectory(dir string) ([]*storage.ModelEntry, e
 			Parameters:          meta.parameters,
 			Capabilities:        inferModelCapabilities(name, filename),
 			RecommendedSettings: inferRecommendedSettings(meta),
-			MMProjFilename:      discoverMMProjFilename(path),
+			MMProjFilename:      discovery.filename,
 			SourceURL:           "file://" + path,
 			Status:              "ready",
 			FilePath:            path,
@@ -856,7 +866,11 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 	if entry.Status != "ready" && entry.Status != "loaded" {
 		return fmt.Errorf("model %s is not ready (status: %s)", id, entry.Status)
 	}
-	opts = m.resolveModelLoadOptions(entry, opts)
+	var err error
+	opts, err = m.resolveModelLoadOptions(entry, opts)
+	if err != nil {
+		return err
+	}
 
 	// Stat the file for its on-disk size; gguf mmap occupies roughly that
 	// many bytes of RAM at inference time.
@@ -943,19 +957,23 @@ func (m *ModelManager) unloadCurrentModel(ctx context.Context) error {
 	return nil
 }
 
-func (m *ModelManager) resolveModelLoadOptions(entry *storage.ModelEntry, opts engine.LoadOptions) engine.LoadOptions {
+func (m *ModelManager) resolveModelLoadOptions(entry *storage.ModelEntry, opts engine.LoadOptions) (engine.LoadOptions, error) {
 	if strings.TrimSpace(opts.MMProjPath) != "" || entry == nil {
-		return opts
+		return opts, nil
 	}
-	if resolved, ok := resolveEntryMMProjPath(entry); ok {
+	resolved, err := resolveEntryMMProjPath(entry)
+	if err != nil {
+		return opts, err
+	}
+	if resolved != "" {
 		opts.MMProjPath = resolved
 	}
-	return opts
+	return opts, nil
 }
 
-func resolveEntryMMProjPath(entry *storage.ModelEntry) (string, bool) {
+func resolveEntryMMProjPath(entry *storage.ModelEntry) (string, error) {
 	if entry == nil || strings.TrimSpace(entry.FilePath) == "" {
-		return "", false
+		return "", nil
 	}
 	modelDir := filepath.Dir(entry.FilePath)
 	configured := strings.TrimSpace(entry.MMProjFilename)
@@ -965,27 +983,38 @@ func resolveEntryMMProjPath(entry *storage.ModelEntry) (string, bool) {
 			resolved = filepath.Join(modelDir, configured)
 		}
 		if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
-			return resolved, true
+			return resolved, nil
 		}
-		slog.Warn("configured mmproj file not found", "model", entry.Name, "mmproj", resolved)
-		return "", false
+		return "", fmt.Errorf("configured mmproj %q for model %s was not found", configured, entry.Name)
 	}
-	filename := discoverMMProjFilename(entry.FilePath)
-	if filename == "" {
-		return "", false
+	discovery := discoverMMProjFilename(entry.FilePath)
+	if discovery.filename != "" {
+		return filepath.Join(modelDir, discovery.filename), nil
 	}
-	return filepath.Join(modelDir, filename), true
+	if len(discovery.ambiguous) > 0 {
+		return "", fmt.Errorf(
+			"multiple mmproj files found for model %s: %s; set mmproj_filename in registry metadata or ORCHESTRA_MMPROJ_PATH explicitly",
+			entry.Name,
+			strings.Join(discovery.ambiguous, ", "),
+		)
+	}
+	return "", nil
 }
 
-func discoverMMProjFilename(modelPath string) string {
+type mmprojDiscovery struct {
+	filename  string
+	ambiguous []string
+}
+
+func discoverMMProjFilename(modelPath string) mmprojDiscovery {
 	modelPath = strings.TrimSpace(modelPath)
 	if modelPath == "" {
-		return ""
+		return mmprojDiscovery{}
 	}
 	dir := filepath.Dir(modelPath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return ""
+		return mmprojDiscovery{}
 	}
 	modelBase := strings.ToLower(filepath.Base(modelPath))
 	modelStem := strings.TrimSuffix(modelBase, filepath.Ext(modelBase))
@@ -1012,24 +1041,25 @@ func discoverMMProjFilename(modelPath string) string {
 		candidates = append(candidates, candidate{name: name, score: score})
 	}
 	if len(candidates) == 0 {
-		return ""
+		return mmprojDiscovery{}
 	}
 	best := candidates[0]
-	tied := false
+	bestNames := []string{best.name}
 	for _, candidate := range candidates[1:] {
 		if candidate.score > best.score {
 			best = candidate
-			tied = false
+			bestNames = []string{candidate.name}
 			continue
 		}
 		if candidate.score == best.score {
-			tied = true
+			bestNames = append(bestNames, candidate.name)
 		}
 	}
-	if tied && best.score == 1 {
-		return ""
+	if len(bestNames) > 1 {
+		sort.Strings(bestNames)
+		return mmprojDiscovery{ambiguous: bestNames}
 	}
-	return best.name
+	return mmprojDiscovery{filename: best.name}
 }
 
 // --- Helpers ---

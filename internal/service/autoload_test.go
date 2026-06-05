@@ -205,6 +205,126 @@ func TestImportFromDirectoryDetectsMMProjSibling(t *testing.T) {
 	}
 }
 
+func TestImportFromDirectoryLeavesMMProjUnsetWhenAmbiguous(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	backend := &autoLoadBackend{}
+	manager := NewModelManager(registry, backend, tmp)
+
+	modelDir := filepath.Join(tmp, "author", "vision-model")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	modelPath := filepath.Join(modelDir, "vision-model.gguf")
+	mmprojA := filepath.Join(modelDir, "mmproj-a.gguf")
+	mmprojB := filepath.Join(modelDir, "mmproj-b.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := os.WriteFile(mmprojA, []byte("mmproj"), 0644); err != nil {
+		t.Fatalf("write mmproj a: %v", err)
+	}
+	if err := os.WriteFile(mmprojB, []byte("mmproj"), 0644); err != nil {
+		t.Fatalf("write mmproj b: %v", err)
+	}
+
+	imported, err := manager.ImportFromDirectory(tmp)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(imported) != 1 {
+		t.Fatalf("expected one imported model, got %d", len(imported))
+	}
+	if imported[0].MMProjFilename != "" {
+		t.Fatalf("expected ambiguous mmproj detection to remain unset, got %q", imported[0].MMProjFilename)
+	}
+}
+
+func TestInferenceRejectsAmbiguousAutoDetectedMMProj(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "vision.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	for _, name := range []string{"mmproj-a.gguf", "mmproj-b.gguf"} {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte("mmproj"), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:       "model-1",
+		Name:     "vision",
+		Filename: "vision.gguf",
+		Status:   "ready",
+		FilePath: modelPath,
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "vision",
+		Messages: []model.ChatMessage{{Role: "user", Content: "describe", Images: []string{"aGVsbG8="}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple mmproj files found") {
+		t.Fatalf("expected ambiguous mmproj error, got %v", err)
+	}
+	if backend.loads != 0 {
+		t.Fatalf("expected load to be blocked, got %d loads", backend.loads)
+	}
+}
+
+func TestInferenceRejectsMissingConfiguredMMProj(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "vision.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:             "model-1",
+		Name:           "vision",
+		Filename:       "vision.gguf",
+		Status:         "ready",
+		FilePath:       modelPath,
+		MMProjFilename: "missing-mmproj.gguf",
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	_, err = inference.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "vision",
+		Messages: []model.ChatMessage{{Role: "user", Content: "describe", Images: []string{"aGVsbG8="}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "configured mmproj") {
+		t.Fatalf("expected missing configured mmproj error, got %v", err)
+	}
+	if backend.loads != 0 {
+		t.Fatalf("expected load to be blocked, got %d loads", backend.loads)
+	}
+}
+
 func TestEmbeddingAutoLoadsRequestedModel(t *testing.T) {
 	tmp := t.TempDir()
 	registry, err := storage.NewModelRegistry(tmp)

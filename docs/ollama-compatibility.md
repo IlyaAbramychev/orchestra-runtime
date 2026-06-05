@@ -58,6 +58,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   sibling `*mmproj*.gguf` in the same directory. The loaded model must still
   be compatible with that projector. Without a resolved projector, requests
   fail fast with a clear configuration error instead of being silently ignored.
+  If multiple sibling `mmproj` files are present and none is configured
+  explicitly, load is rejected with an ambiguity error instead of guessing.
 - `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
   `<think>...</think>` model output into `message.thinking` or `thinking` for
   non-streaming responses and buffered NDJSON streams.
@@ -83,9 +85,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 2. Advanced request parity
    - Token-level streaming tool-call/thinking deltas and tool-result lifecycle
      hardening.
-   - Multimodal operational maturity: compatibility fixtures, better
-     ambiguity handling when multiple mmproj files exist, and broader client
-     coverage.
+   - Multimodal operational maturity: compatibility fixtures and broader
+     client coverage.
    - Broader JSON Schema compatibility fixtures against Ollama clients.
    - Backend-level thinking controls.
 
