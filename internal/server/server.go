@@ -167,6 +167,8 @@ func (s *Server) buildRouter(
 		r.Get("/api/tags", modelsH.ListOllamaTags)
 		r.Get("/api/ps", modelsH.ListRunning)
 		r.Post("/api/show", modelsH.Show)
+		r.Delete("/api/delete", modelsH.DeleteOllama)
+		r.Get("/api/version", systemH.Version)
 
 		// Model management
 		r.Route("/api/models", func(r chi.Router) {

@@ -131,6 +131,35 @@ func (h *ModelsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// DeleteOllama handles DELETE /api/delete (Ollama-compat).
+// Body: {"model": "name-or-id"}.
+func (h *ModelsHandler) DeleteOllama(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model string `json:"model"`
+		Name  string `json:"name"` // permissive alias for older local clients
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	ref := req.Model
+	if ref == "" {
+		ref = req.Name
+	}
+	entry, err := h.manager.ResolveModel(ref)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := h.manager.DeleteModel(entry.ID); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
 // Load handles POST /api/models/{id}/load.
 //
 // Body is optional — any omitted field falls back to the runtime's configured

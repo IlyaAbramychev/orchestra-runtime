@@ -28,6 +28,13 @@ func (h *SystemHandler) Health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Version handles GET /api/version using Ollama's response shape.
+func (h *SystemHandler) Version(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"version": service.Version,
+	})
+}
+
 // Info handles GET /api/system.
 func (h *SystemHandler) Info(w http.ResponseWriter, r *http.Request) {
 	queueDepth := 0

@@ -321,6 +321,38 @@ func TestShowIncludesModelMetadata(t *testing.T) {
 	}
 }
 
+func TestDeleteOllamaResolvesModelName(t *testing.T) {
+	registry, err := storage.NewModelRegistry(t.TempDir())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:       "stable-id",
+		Name:     "llama3.2:latest",
+		Filename: "llama3.2.gguf",
+		Status:   "ready",
+		External: true,
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &fakeChatBackend{}
+	manager := service.NewModelManager(registry, backend, t.TempDir())
+	handler := NewModelsHandler(manager, backend)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/delete", strings.NewReader(`{"model":"llama3.2:latest"}`))
+	rec := httptest.NewRecorder()
+
+	handler.DeleteOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := registry.Get("stable-id"); got != nil {
+		t.Fatalf("expected model to be deleted, got %#v", got)
+	}
+}
+
 func waitForSchedulerState(t *testing.T, scheduler *service.RuntimeScheduler, want string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
