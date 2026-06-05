@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -539,6 +540,69 @@ func TestPullOllamaLibraryModelPersistsManifestMetadata(t *testing.T) {
 	}
 	if !strings.Contains(entry.Modelfile, "SYSTEM") || !strings.Contains(entry.Modelfile, "LICENSE") {
 		t.Fatalf("modelfile = %q", entry.Modelfile)
+	}
+}
+
+func TestPullOllamaLibraryModelWithRecordedRegistryFixture(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+
+	fixtureDir := filepath.Join("testdata", "ollama_registry")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/recorded/manifests/latest":
+			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+			http.ServeFile(w, r, filepath.Join(fixtureDir, "manifest.json"))
+		default:
+			prefix := "/v2/library/recorded/blobs/"
+			digest := strings.TrimPrefix(r.URL.Path, prefix)
+			if digest == r.URL.Path {
+				http.NotFound(w, r)
+				return
+			}
+			blobName := strings.Replace(digest, ":", "-", 1)
+			http.ServeFile(w, r, filepath.Join(fixtureDir, "blobs", blobName))
+		}
+	}))
+	defer server.Close()
+
+	ref := strings.TrimPrefix(server.URL, "http://") + "/library/recorded:latest"
+	id, err := manager.PullOllamaLibraryModel(context.Background(), ref, true, nil)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	entry := registry.Get(id)
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	if entry.SHA256 != "987c23397402954bc7db2283b33ab16036fd67a68d6224ddf8078e9fbb2767b8" {
+		t.Fatalf("sha256 = %q", entry.SHA256)
+	}
+	if entry.Template != "{{ .System }}\n{{ .Prompt }}\n" {
+		t.Fatalf("template = %q", entry.Template)
+	}
+	if entry.System != "You are a recorded fixture.\n" {
+		t.Fatalf("system = %q", entry.System)
+	}
+	if len(entry.StopTokens) != 1 || entry.StopTokens[0] != "<|stop|>" {
+		t.Fatalf("stop tokens = %#v", entry.StopTokens)
+	}
+	if entry.OllamaParameters != "PARAMETER stop \"<|stop|>\"\nPARAMETER temperature 0.1" {
+		t.Fatalf("ollama parameters = %q", entry.OllamaParameters)
+	}
+	if len(entry.License) != 1 || entry.License[0] != "Apache-2.0" {
+		t.Fatalf("license = %#v", entry.License)
+	}
+	data, err := os.ReadFile(entry.FilePath)
+	if err != nil {
+		t.Fatalf("read pulled model: %v", err)
+	}
+	if string(data) != "gguf fixture\n" {
+		t.Fatalf("model blob = %q", data)
 	}
 }
 

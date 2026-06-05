@@ -37,6 +37,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - Ollama registry pulls persist manifest-derived template, parameters, stop
   tokens, system prompt, license, and a Modelfile-style representation for
   `/api/show`.
+- Ollama registry manifest/blob pull flow is covered by recorded fixture tests
+  with digest verification and manifest metadata layers.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -44,23 +46,19 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 
 ## Next Milestones
 
-1. Full Ollama pull registry support
-   - Add integration coverage against the public Ollama registry with a small
-     model fixture or recorded registry responses.
-
-2. Additional lifecycle endpoints
+1. Additional lifecycle endpoints
    - `POST /api/copy`
    - `POST /api/create`
    - `POST /api/push` only if Operium needs publishing.
    - Blob endpoints only if full Ollama manifest support requires them.
 
-3. Advanced request parity
+2. Advanced request parity
    - Chat tool calls.
    - Multimodal `images`.
    - Structured output via `format`.
    - Thinking model controls.
 
-4. Operational maturity
+3. Operational maturity
    - Keep Orchestra extensions additive and avoid changing Ollama field names.
    - Runtime capability endpoint for extension feature detection.
    - Stable error codes and HTTP mappings.
