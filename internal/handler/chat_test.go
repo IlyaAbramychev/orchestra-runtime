@@ -342,6 +342,26 @@ func TestOllamaChatImagesForwardToBackend(t *testing.T) {
 	}
 }
 
+func TestOllamaChatImagesForwardMultipleMixedEncodings(t *testing.T) {
+	backend := &fakeChatBackend{}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"messages":[{"role":"user","content":"compare","images":["aGVsbG8=","data:image/png;base64,d29ybGQ="]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(backend.lastMessages) != 1 || len(backend.lastMessages[0].Images) != 2 {
+		t.Fatalf("expected both image payloads forwarded to backend, got %+v", backend.lastMessages)
+	}
+	if backend.lastMessages[0].Images[1] != "data:image/png;base64,d29ybGQ=" {
+		t.Fatalf("expected data URI preserved, got %+v", backend.lastMessages[0].Images)
+	}
+}
+
 func TestOllamaChatToolCallsRejectUnknownTool(t *testing.T) {
 	backend := &fakeChatBackend{completeText: `{"tool_calls":[{"function":{"name":"delete_everything","arguments":{}}}]}`}
 	h := NewChatHandler(service.NewInferenceService(backend, 1))
@@ -417,6 +437,27 @@ func TestRuntimeErrorStatusMapping(t *testing.T) {
 
 			if rec.Code != tc.want {
 				t.Fatalf("expected status %d, got %d: %s", tc.want, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRuntimeErrorPayloadClassifiesMultimodalErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "invalid image", err: fmt.Errorf("decode image 0: invalid base64 image: illegal base64 data"), want: "invalid_image_input"},
+		{name: "missing mmproj", err: fmt.Errorf("multimodal images require a loaded mmproj"), want: "multimodal_configuration_error"},
+		{name: "incompatible projector", err: fmt.Errorf("mmproj does not support vision input: /tmp/bad.gguf"), want: "multimodal_projector_incompatible"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := runtimeErrorPayload(tc.err)
+			if payload["code"] != tc.want {
+				t.Fatalf("expected code %q, got %#v", tc.want, payload)
 			}
 		})
 	}

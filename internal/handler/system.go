@@ -89,7 +89,7 @@ func (h *SystemHandler) Capabilities(w http.ResponseWriter, r *http.Request) {
 			{Name: "tool_calls_streaming", Status: "partial", Notes: "buffered stream; emits parsed tool_calls after generation completes"},
 			{Name: "thinking_non_streaming", Status: "partial", Notes: "separates <think>...</think> output; backend-level thinking control is not implemented"},
 			{Name: "thinking_streaming", Status: "partial", Notes: "buffered stream; separates <think>...</think> output after generation completes"},
-			{Name: "multimodal_images", Status: "partial", Notes: "requires ORCHESTRA_MMPROJ_PATH and a compatible vision model/mmproj pair"},
+			{Name: "multimodal_images", Status: "partial", Notes: "requires a resolved mmproj (global ORCHESTRA_MMPROJ_PATH or model-scoped mmproj_filename) and a compatible vision model/mmproj pair"},
 			{Name: "grammar_constrained_decoding", Status: "supported", Notes: "Ollama format uses llama.cpp JSON Schema to GBNF conversion"},
 		},
 	})

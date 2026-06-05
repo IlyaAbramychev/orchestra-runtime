@@ -110,6 +110,19 @@ func runtimeErrorCode(err error) string {
 		strings.Contains(msg, "context window"),
 		strings.Contains(msg, "context_overflow"):
 		return engine.ContextLengthExceededCode
+	case strings.Contains(msg, "invalid base64 image"),
+		strings.Contains(msg, "empty image payload"),
+		strings.Contains(msg, "decode image "),
+		strings.Contains(msg, "failed to decode image input"):
+		return "invalid_image_input"
+	case strings.Contains(msg, "mmproj does not support vision input"):
+		return "multimodal_projector_incompatible"
+	case strings.Contains(msg, "configured mmproj"),
+		strings.Contains(msg, "multiple mmproj files found"),
+		strings.Contains(msg, "multimodal images require a loaded mmproj"),
+		strings.Contains(msg, "mmproj context is not loaded"),
+		strings.Contains(msg, "failed to load mmproj"):
+		return "multimodal_configuration_error"
 	default:
 		return ""
 	}

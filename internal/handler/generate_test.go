@@ -66,6 +66,25 @@ func TestGenerateImagesForwardToBackend(t *testing.T) {
 	}
 }
 
+func TestGenerateImagesForwardMultipleMixedEncodings(t *testing.T) {
+	backend := &fakeChatBackend{}
+	h := NewGenerateHandler(service.NewInferenceService(backend, 1))
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(`{"model":"test","prompt":"compare","images":["aGVsbG8=","data:image/png;base64,d29ybGQ="],"stream":false}`))
+	rec := httptest.NewRecorder()
+
+	h.Generate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(backend.lastMessages) != 1 || len(backend.lastMessages[0].Images) != 2 {
+		t.Fatalf("expected both image payloads forwarded to backend, got %+v", backend.lastMessages)
+	}
+	if backend.lastMessages[0].Images[1] != "data:image/png;base64,d29ybGQ=" {
+		t.Fatalf("expected data URI preserved, got %+v", backend.lastMessages[0].Images)
+	}
+}
+
 func TestGenerateFormatJSONValidatesResponse(t *testing.T) {
 	backend := &fakeChatBackend{completeText: `{"answer":"ok"}`}
 	h := NewGenerateHandler(service.NewInferenceService(backend, 1))

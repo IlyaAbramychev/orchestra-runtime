@@ -76,9 +76,10 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - Real multimodal compatibility fixtures are available as env-gated integration
   tests. Set `ORCHESTRA_TEST_VISION_MODEL_PATH` and
   `ORCHESTRA_TEST_VISION_MMPROJ_PATH` to run a real `/api/chat` and
-  `/api/generate` image request against a compatible vision pair; optionally
-  set `ORCHESTRA_TEST_BAD_MMPROJ_PATH` to verify projector/model mismatch
-  failures.
+  `/api/generate` image request against a compatible vision pair, including
+  mixed raw-base64 and `data:` URI image payloads plus multi-image requests;
+  optionally set `ORCHESTRA_TEST_BAD_MMPROJ_PATH` to verify
+  projector/model mismatch failures.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
 - Durations in chat and generate responses are returned in nanoseconds.
 

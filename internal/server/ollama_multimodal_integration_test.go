@@ -21,6 +21,7 @@ import (
 )
 
 const tinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0a8AAAAASUVORK5CYII="
+const tinyPNGDataURI = "data:image/png;base64," + tinyPNGBase64
 
 func TestOllamaMultimodalRealVisionIntegration(t *testing.T) {
 	modelPath := strings.TrimSpace(os.Getenv("ORCHESTRA_TEST_VISION_MODEL_PATH"))
@@ -54,6 +55,25 @@ func TestOllamaMultimodalRealVisionIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("chat multiple images mixed encodings", func(t *testing.T) {
+		var resp model.OllamaChatResponse
+		visionJSON(
+			t,
+			server.URL,
+			http.MethodPost,
+			"/api/chat",
+			`{"model":"vision-smoke:latest","stream":false,"messages":[{"role":"user","content":"compare both images briefly","images":["`+tinyPNGBase64+`","`+tinyPNGDataURI+`"]}]}`,
+			http.StatusOK,
+			&resp,
+		)
+		if !resp.Done {
+			t.Fatalf("expected final response, got %+v", resp)
+		}
+		if resp.Error != "" {
+			t.Fatalf("unexpected chat error: %+v", resp)
+		}
+	})
+
 	t.Run("generate", func(t *testing.T) {
 		var resp model.GenerateResponse
 		visionJSON(
@@ -75,6 +95,25 @@ func TestOllamaMultimodalRealVisionIntegration(t *testing.T) {
 			t.Fatalf("expected prompt eval count, got %+v", resp)
 		}
 	})
+
+	t.Run("generate multiple images mixed encodings", func(t *testing.T) {
+		var resp model.GenerateResponse
+		visionJSON(
+			t,
+			server.URL,
+			http.MethodPost,
+			"/api/generate",
+			`{"model":"vision-smoke:latest","stream":false,"prompt":"compare both images briefly","images":["`+tinyPNGBase64+`","`+tinyPNGDataURI+`"]}`,
+			http.StatusOK,
+			&resp,
+		)
+		if !resp.Done {
+			t.Fatalf("expected final response, got %+v", resp)
+		}
+		if resp.Error != "" {
+			t.Fatalf("unexpected generate error: %+v", resp)
+		}
+	})
 }
 
 func TestOllamaMultimodalRejectsIncompatibleProjector(t *testing.T) {
@@ -87,7 +126,12 @@ func TestOllamaMultimodalRejectsIncompatibleProjector(t *testing.T) {
 	server := httptest.NewServer(newVisionIntegrationRouter(t, modelPath, badMMProjPath))
 	t.Cleanup(server.Close)
 
-	var resp map[string]string
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
 	visionJSON(
 		t,
 		server.URL,
@@ -97,10 +141,13 @@ func TestOllamaMultimodalRejectsIncompatibleProjector(t *testing.T) {
 		http.StatusBadRequest,
 		&resp,
 	)
-	if msg := strings.ToLower(strings.TrimSpace(resp["error"])); msg == "" {
+	if msg := strings.ToLower(strings.TrimSpace(resp.Error.Message)); msg == "" {
 		t.Fatalf("expected error payload, got %+v", resp)
 	} else if !containsAny(msg, "mmproj", "projector", "vision", "clip") {
 		t.Fatalf("expected projector-related error, got %q", msg)
+	}
+	if resp.Error.Code == "" {
+		t.Fatalf("expected classified error code, got %+v", resp)
 	}
 }
 
