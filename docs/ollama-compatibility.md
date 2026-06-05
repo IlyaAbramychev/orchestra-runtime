@@ -25,10 +25,11 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 ## Compatibility Notes
 
 - `/api/pull` supports Ollama's `model`, `stream`, and `insecure` request
-  fields, plus an Orchestra extension: `source_url`.
-- Pulling by Ollama library name alone is not implemented yet because the
-  current model manager downloads direct GGUF files rather than Ollama
-  manifests and blob layers.
+  fields.
+- `/api/pull` can resolve Ollama registry names through the manifest/blob
+  registry path.
+- `/api/pull` also supports an Orchestra extension: `source_url`, for direct
+  GGUF downloads outside an Ollama registry.
 - Streaming pull responses use newline-delimited JSON and end with
   `{"status":"success"}`.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -37,10 +38,10 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 ## Next Milestones
 
 1. Full Ollama pull registry support
-   - Resolve `model[:tag]` through an Ollama-compatible registry.
-   - Download manifests and blob layers.
-   - Resume partial blob downloads.
    - Share progress for concurrent pulls.
+   - Persist richer manifest metadata for `/api/show`.
+   - Add integration coverage against the public Ollama registry with a small
+     model fixture or recorded registry responses.
 
 2. Response parity hardening
    - Add golden response tests for `/api/chat`, `/api/generate`, `/api/tags`,

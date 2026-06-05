@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -433,23 +435,58 @@ func TestPullOllamaStreamsProgress(t *testing.T) {
 	}
 }
 
-func TestPullOllamaRequiresSourceURLForLibraryNames(t *testing.T) {
-	registry, err := storage.NewModelRegistry(t.TempDir())
+func TestPullOllamaNonStreamDownloadsRegistryManifest(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
 	backend := &fakeChatBackend{}
-	manager := service.NewModelManager(registry, backend, t.TempDir())
+	manager := service.NewModelManager(registry, backend, tmp)
 	handler := NewModelsHandler(manager, backend)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/pull", strings.NewReader(`{"model":"llama3.2"}`))
+	modelBlob := []byte("registry-model")
+	modelDigest := testDigest(modelBlob)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/tiny/manifests/latest":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"schemaVersion": 2,
+				"mediaType":     "application/vnd.docker.distribution.manifest.v2+json",
+				"layers": []map[string]any{
+					{
+						"mediaType": "application/vnd.ollama.image.model",
+						"digest":    modelDigest,
+						"size":      len(modelBlob),
+					},
+				},
+			})
+		case "/v2/library/tiny/blobs/" + modelDigest:
+			_, _ = w.Write(modelBlob)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	modelRef := strings.TrimPrefix(server.URL, "http://") + "/library/tiny:latest"
+	body := `{"model":"` + modelRef + `","insecure":true,"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/api/pull", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	handler.PullOllama(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if _, err := manager.ResolveModel("library/tiny"); err != nil {
+		t.Fatalf("expected registry model to be registered: %v", err)
+	}
+}
+
+func testDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum)
 }
 
 func waitForSchedulerState(t *testing.T, scheduler *service.RuntimeScheduler, want string) {

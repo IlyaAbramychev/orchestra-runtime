@@ -139,27 +139,24 @@ func (h *ModelsHandler) PullOllama(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, sourceURL, err := normalizeOllamaPullRequest(&req)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	id, err := h.manager.PullModel(name, sourceURL)
-	if err != nil {
-		slog.Error("ollama pull failed", "error", err)
-		writeRuntimeError(w, err)
-		return
-	}
-
 	stream := true
 	if req.Stream != nil {
 		stream = *req.Stream
 	}
-	if !stream {
-		h.waitForOllamaPull(w, r, id)
+	isDirect, name, sourceURL, err := normalizeDirectOllamaPullRequest(&req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	h.streamOllamaPull(w, r, id)
+	if isDirect {
+		h.pullDirectOllama(w, r, name, sourceURL, stream)
+		return
+	}
+	if stream {
+		h.streamOllamaRegistryPull(w, r, &req)
+		return
+	}
+	h.waitForOllamaRegistryPull(w, r, &req)
 }
 
 // Delete handles DELETE /api/models/{id}.
@@ -201,26 +198,26 @@ func (h *ModelsHandler) DeleteOllama(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func normalizeOllamaPullRequest(req *model.OllamaPullRequest) (string, string, error) {
+func normalizeDirectOllamaPullRequest(req *model.OllamaPullRequest) (bool, string, string, error) {
 	name := strings.TrimSpace(req.Model)
 	sourceURL := strings.TrimSpace(req.SourceURL)
 	if name == "" {
-		return "", "", fmt.Errorf("model is required")
+		return false, "", "", fmt.Errorf("model is required")
 	}
 	if sourceURL == "" && isHTTPURL(name) {
 		sourceURL = name
 		name = modelNameFromURL(name)
 	}
 	if sourceURL == "" {
-		return "", "", fmt.Errorf("pull by Ollama library name is not supported yet; provide source_url")
+		return false, "", "", nil
 	}
 	if !isHTTPURL(sourceURL) {
-		return "", "", fmt.Errorf("source_url must be an http or https URL")
+		return false, "", "", fmt.Errorf("source_url must be an http or https URL")
 	}
 	if name == "" {
 		name = "model"
 	}
-	return name, sourceURL, nil
+	return true, name, sourceURL, nil
 }
 
 func isHTTPURL(value string) bool {
@@ -237,6 +234,20 @@ func modelNameFromURL(value string) string {
 		return "model"
 	}
 	return value
+}
+
+func (h *ModelsHandler) pullDirectOllama(w http.ResponseWriter, r *http.Request, name, sourceURL string, stream bool) {
+	id, err := h.manager.PullModel(name, sourceURL)
+	if err != nil {
+		slog.Error("ollama direct pull failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+	if !stream {
+		h.waitForOllamaPull(w, r, id)
+		return
+	}
+	h.streamOllamaPull(w, r, id)
 }
 
 func (h *ModelsHandler) waitForOllamaPull(w http.ResponseWriter, r *http.Request, id string) {
@@ -309,6 +320,44 @@ func writeOllamaPullChunk(w http.ResponseWriter, flusher http.Flusher, resp mode
 	if data, err := json.Marshal(resp); err == nil {
 		fmt.Fprintf(w, "%s\n", data)
 		flusher.Flush()
+	}
+}
+
+func (h *ModelsHandler) waitForOllamaRegistryPull(w http.ResponseWriter, r *http.Request, req *model.OllamaPullRequest) {
+	_, err := h.manager.PullOllamaLibraryModel(r.Context(), req.Model, req.Insecure, nil)
+	if err != nil {
+		slog.Error("ollama registry pull failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, model.OllamaPullResponse{Status: "success"})
+}
+
+func (h *ModelsHandler) streamOllamaRegistryPull(w http.ResponseWriter, r *http.Request, req *model.OllamaPullRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	_, err := h.manager.PullOllamaLibraryModel(r.Context(), req.Model, req.Insecure, func(progress service.OllamaPullProgress) {
+		writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{
+			Status:    progress.Status,
+			Digest:    progress.Digest,
+			Total:     progress.Total,
+			Completed: progress.Completed,
+		})
+	})
+	if err != nil {
+		slog.Error("ollama registry pull stream failed", "error", err)
+		writeOllamaPullChunk(w, flusher, model.OllamaPullResponse{
+			Status: "error",
+			Error:  err.Error(),
+		})
 	}
 }
 
