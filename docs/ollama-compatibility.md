@@ -22,7 +22,7 @@ Implemented:
 - `GET /api/version`
 
 Extended Orchestra endpoints remain available under `/api/models`, `/api/system`,
-`/api/status`, `/api/logs`, and `/api/shutdown`.
+`/api/status`, `/api/capabilities`, `/api/logs`, and `/api/shutdown`.
 
 ## Compatibility Notes
 
@@ -56,6 +56,8 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 - `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
   `<think>...</think>` model output into `message.thinking` or `thinking` for
   non-streaming responses. Streaming thinking output is not implemented yet.
+- `/api/capabilities` exposes machine-readable feature detection for supported,
+  partial, extension, and unsupported compatibility behavior.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
@@ -75,6 +77,5 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
 
 3. Operational maturity
    - Keep Orchestra extensions additive and avoid changing Ollama field names.
-   - Runtime capability endpoint for extension feature detection.
    - Stable error codes and HTTP mappings.
    - Release smoke tests against an Ollama-client compatibility suite.

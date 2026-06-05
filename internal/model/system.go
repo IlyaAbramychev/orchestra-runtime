@@ -31,6 +31,24 @@ type RuntimeStatusResponse struct {
 	Error           *string `json:"error"`
 }
 
+type RuntimeCapabilitiesResponse struct {
+	Service  string              `json:"service"`
+	Version  string              `json:"version"`
+	Ollama   OllamaCapabilities  `json:"ollama"`
+	Features []FeatureCapability `json:"features"`
+}
+
+type OllamaCapabilities struct {
+	Compatible bool     `json:"compatible"`
+	Endpoints  []string `json:"endpoints"`
+}
+
+type FeatureCapability struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Notes  string `json:"notes,omitempty"`
+}
+
 type GPUInfo struct {
 	Name      string `json:"name"`
 	TotalVRAM int64  `json:"total_vram_bytes"`
