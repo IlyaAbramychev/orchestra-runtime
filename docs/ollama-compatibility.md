@@ -47,14 +47,17 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   output. The runtime steers the prompt, converts JSON Schema objects to GBNF
   with llama.cpp's converter, applies the grammar during decoding, and validates
   that the final response is valid JSON and conforms to the requested schema.
-- `/api/chat` accepts Ollama `tools` in non-streaming mode and returns parsed
-  `message.tool_calls`. Tool execution remains the client's responsibility;
-  streaming tool calls are supported as buffered NDJSON responses, not
-  token-level deltas.
+- `/api/chat` routes Ollama `tools` through llama.cpp's native Jinja
+  chat-template, grammar, and parser APIs and returns `message.tool_calls`.
+  Tool execution remains the client's responsibility; streaming tool calls are
+  supported as buffered NDJSON responses, not token-level deltas. Availability
+  is model-scoped because the embedded GGUF template must support tools.
 - `/v1/chat/completions` accepts OpenAI-compatible `tools`, `tool_choice`, and
   `parallel_tool_calls=false`. It returns string-valued function arguments and
-  preserves assistant tool-call/tool-result history. Streaming tool calls use
-  buffered SSE and are emitted after generation completes.
+  preserves structured assistant tool-call/tool-result history without prompt
+  injection. Function arguments are schema-validated; malformed calls finish
+  with `tool_protocol_error`. Streaming tool calls use buffered SSE and are
+  emitted after generation completes.
 - `/api/chat` message `images` and `/api/generate` `images` support
   multimodal prompts when the runtime has either a global
   `ORCHESTRA_MMPROJ_PATH=/path/to/mmproj.gguf` or a model-scoped
@@ -69,9 +72,11 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   a base64 `data:` URI using PNG, JPEG, or WebP; remote URLs are rejected.
   Requests are limited to 16 images, 20 MiB decoded per image, and 50 MiB
   decoded across the request.
-- `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
-  `<think>...</think>` model output into `message.thinking` or `thinking` for
-  non-streaming responses and buffered NDJSON streams.
+- `/api/chat` validates Ollama's `think` option and passes thinking control to
+  the native model chat template. Native parsing separates reasoning from
+  visible content (`message.thinking` for Ollama and `reasoning_content` for
+  OpenAI-compatible responses). `<think>` splitting remains a compatibility
+  fallback for templates that do not expose structured reasoning.
 - `/api/chat` and `/api/generate` support streaming structured output as a
   buffered NDJSON response: the runtime validates the final JSON/schema output
   before emitting stream chunks.
@@ -107,7 +112,6 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
    - Multimodal operational maturity: broader client coverage and release
      fixtures beyond the env-gated vision integration tests.
    - Broader JSON Schema compatibility fixtures against Ollama clients.
-   - Backend-level thinking controls.
 
 3. Operational maturity
    - Keep Orchestra extensions additive and avoid changing Ollama field names.
