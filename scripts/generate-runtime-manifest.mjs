@@ -61,7 +61,8 @@ async function main() {
 
   const artifactsDir = path.resolve(String(args['artifacts-dir']));
   const baseUrl = String(args['base-url']).replace(/\/+$/, '');
-  const runtimeVersion = String(args.version).replace(/^v/i, '');
+  const releaseTag = String(args.version).trim();
+  const runtimeVersion = releaseTag.replace(/^v/i, '');
   const outputPath = path.resolve(String(args.output));
 
   const entries = await fs.readdir(artifactsDir, { withFileTypes: true });
@@ -79,11 +80,11 @@ async function main() {
       arch: parsed.arch,
     };
     if (parsed.kind === 'runtime') {
-      artifact.url = `${baseUrl}/${runtimeVersion}/${fileName}`;
+      artifact.url = `${baseUrl}/${releaseTag}/${fileName}`;
       artifact.sha256 = await sha256File(abs);
       artifact.size = stat.size;
     } else {
-      artifact.workerUrl = `${baseUrl}/${runtimeVersion}/${fileName}`;
+      artifact.workerUrl = `${baseUrl}/${releaseTag}/${fileName}`;
       artifact.workerSha256 = await sha256File(abs);
       artifact.workerSize = stat.size;
     }
@@ -95,6 +96,15 @@ async function main() {
   if (artifacts.length === 0) {
     throw new Error(
       `No runtime artifacts found in ${artifactsDir}. Expected names like orchestra-runtime-darwin-arm64`
+    );
+  }
+  const incompleteTargets = artifacts
+    .filter((artifact) => !artifact.workerUrl || !artifact.workerSha256)
+    .map((artifact) => `${artifact.platform}/${artifact.arch}`);
+  if (incompleteTargets.length > 0) {
+    throw new Error(
+      `Missing worker artifact for: ${incompleteTargets.join(', ')}. ` +
+      'Each Runtime artifact must be published with its matching orchestra-worker binary.',
     );
   }
 

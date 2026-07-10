@@ -18,7 +18,7 @@ on:
       base_url:
         description: Public base URL for runtime artifacts
         required: true
-        default: https://updates.operium.ru/orchestra-runtime
+        default: https://github.com/IlyaAbramychev/orchestra-runtime/releases/download
         type: string
       min_extension_version:
         description: Minimal compatible extension version

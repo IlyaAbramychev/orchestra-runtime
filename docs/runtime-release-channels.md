@@ -42,7 +42,10 @@ Channel manifests add:
       "arch": "arm64",
       "url": "https://updates.operium.ru/orchestra-runtime/1.4.2/orchestra-runtime-darwin-arm64",
       "sha256": "hex",
-      "size": 12345678
+      "size": 12345678,
+      "workerUrl": "https://updates.operium.ru/orchestra-runtime/1.4.2/orchestra-worker-darwin-arm64",
+      "workerSha256": "hex",
+      "workerSize": 12345678
     }
   ]
 }
@@ -58,6 +61,18 @@ Generator recognizes runtime binaries with exact names:
 - `orchestra-runtime-linux-x64`
 - `orchestra-runtime-win32-arm64.exe`
 - `orchestra-runtime-win32-x64.exe`
+
+Every Runtime artifact must have a matching Worker artifact for the same target:
+
+- `orchestra-worker-darwin-arm64`
+- `orchestra-worker-darwin-x64`
+- `orchestra-worker-linux-arm64`
+- `orchestra-worker-linux-x64`
+- `orchestra-worker-win32-arm64.exe`
+- `orchestra-worker-win32-x64.exe`
+
+For GitHub Releases, use `https://github.com/<owner>/<repo>/releases/download` as
+the base URL and pass the release tag (for example `v1.4.2`) to `--version`.
 
 ## Manual generation
 
