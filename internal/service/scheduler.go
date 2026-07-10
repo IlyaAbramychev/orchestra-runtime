@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
@@ -140,12 +142,82 @@ func (s *RuntimeScheduler) clearActive() {
 }
 
 func (s *RuntimeScheduler) LoadModel(ctx context.Context, modelID, path string, opts engine.LoadOptions) error {
+	_, err := s.LoadModelAttempts(ctx, modelID, path, []engine.LoadOptions{opts})
+	return err
+}
+
+// LoadModelAttempts holds the lifecycle slot for the complete adaptive load.
+// No inference or competing model switch can run between OOM retries.
+func (s *RuntimeScheduler) LoadModelAttempts(ctx context.Context, modelID, path string, attempts []engine.LoadOptions) (engine.LoadOptions, error) {
 	release, err := s.acquireFor(ctx, engine.StateLoading, modelID)
 	if err != nil {
-		return err
+		return engine.LoadOptions{}, err
 	}
 	defer release()
-	return s.engine.LoadModel(modelID, path, opts)
+	return loadModelWithAttempts(ctx, s.engine, modelID, path, attempts)
+}
+
+func loadModelWithAttempts(ctx context.Context, backend engine.Backend, modelID, path string, attempts []engine.LoadOptions) (engine.LoadOptions, error) {
+	if len(attempts) == 0 {
+		return engine.LoadOptions{}, fmt.Errorf("no model load attempts configured")
+	}
+	var lastErr error
+	for index, opts := range attempts {
+		if err := ctx.Err(); err != nil {
+			return engine.LoadOptions{}, err
+		}
+		if err := backend.LoadModel(modelID, path, opts); err == nil {
+			if index > 0 {
+				slog.Info("model loaded after automatic memory retry",
+					"model", modelID,
+					"attempt", index+1,
+					"ctx_size", opts.CtxSize,
+					"batch_size", opts.BatchSize,
+					"type_k", normalizeKVName(opts.TypeK),
+					"type_v", normalizeKVName(opts.TypeV),
+				)
+			}
+			return opts, nil
+		} else {
+			lastErr = err
+			if index == len(attempts)-1 || opts.DisableAutoFit || !isRetryableMemoryLoadError(err) {
+				break
+			}
+			next := attempts[index+1]
+			slog.Warn("model load hit memory pressure; retrying with a smaller automatic profile",
+				"model", modelID,
+				"attempt", index+1,
+				"error", err,
+				"next_ctx_size", next.CtxSize,
+				"next_batch_size", next.BatchSize,
+				"next_type_k", normalizeKVName(next.TypeK),
+				"next_type_v", normalizeKVName(next.TypeV),
+			)
+		}
+	}
+	return engine.LoadOptions{}, lastErr
+}
+
+func isRetryableMemoryLoadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"out of memory",
+		"cannot allocate memory",
+		"failed to allocate",
+		"allocation failed",
+		"insufficient memory",
+		"resource shortage",
+		"erroroutofmemory",
+		"memory exhausted",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *RuntimeScheduler) UnloadModel(ctx context.Context) error {

@@ -69,6 +69,7 @@ type ModelManager struct {
 	scheduler          *RuntimeScheduler
 	modelsDir          string
 	defaultLoadOptions engine.LoadOptions
+	loadPlanner        *LoadPlanner
 	loadMu             sync.Mutex
 	pullMu             sync.Mutex
 	downloads          sync.Map // id -> *DownloadState
@@ -81,6 +82,7 @@ func NewModelManager(registry *storage.ModelRegistry, eng engine.Backend, models
 		engine:             eng,
 		modelsDir:          modelsDir,
 		defaultLoadOptions: engine.DefaultLoadOptions(),
+		loadPlanner:        NewLoadPlanner(),
 	}
 }
 
@@ -91,6 +93,7 @@ func NewModelManagerWithScheduler(registry *storage.ModelRegistry, scheduler *Ru
 		scheduler:          scheduler,
 		modelsDir:          modelsDir,
 		defaultLoadOptions: engine.DefaultLoadOptions(),
+		loadPlanner:        NewLoadPlanner(),
 	}
 }
 
@@ -903,80 +906,49 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 		return err
 	}
 
-	// Stat the file for its on-disk size; gguf mmap occupies roughly that
-	// many bytes of RAM at inference time.
-	if os.Getenv("ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT") != "1" {
-		if st, err := os.Stat(entry.FilePath); err == nil {
-			modelBytes := st.Size()
-
-			// Per-token KV estimate (fp16). The size tier is a conservative
-			// fallback; architecture-specific corrections account for hybrid
-			// models that do not allocate KV on every layer.
-			//
-			//   ≤ 8 GB  → 64 KB/tok  (Qwen3 7-9B / Llama 3 8B avg)
-			//   ≤ 20 GB → 128 KB/tok (14B class)
-			//   ≤ 45 GB → 256 KB/tok (32B class)
-			//     > 45  → 384 KB/tok (70B+)
-			//
-			// Quantisation scales linearly. Base kvPerTok assumes BOTH K and V in fp16.
-			// If only one side is quantised we scale proportionally:
-			//   factor = (factor(K) + factor(V)) / 2
-			kvPerTok := kvBytesPerTokenForModel(modelBytes, modelFamily(entry))
-			kFactor := kvQuantFactor(opts.TypeK)
-			vFactor := kvQuantFactor(opts.TypeV)
-			kvPerTok = int(float64(kvPerTok) * ((kFactor + vFactor) / 2.0))
-
-			ctxSize := opts.CtxSize
-			if ctxSize == 0 {
-				ctxSize = 4096
-			}
-			kvBytes := int64(ctxSize) * int64(kvPerTok)
-			avail := getAvailableRAM()
-			total := getTotalRAM()
-			const headroom int64 = 2 * 1024 * 1024 * 1024
-			availBudget := avail - headroom
-			totalBudget := total - headroom
-			if totalBudget <= 0 {
-				totalBudget = availBudget
-			}
-			needed := modelBytes + projectorBytes + kvBytes
-			if totalBudget > 0 && needed > totalBudget {
-				projectorEstimate := ""
-				if projectorBytes > 0 {
-					projectorEstimate = fmt.Sprintf(" + mmproj %.1f GB", float64(projectorBytes)/1024/1024/1024)
-				}
-				return fmt.Errorf(
-					"load would exceed RAM safety budget: model %.1f GB%s + KV ~%.1f GB = %.1f GB, "+
-						"available %.1f GB, total %.1f GB (reserved 2 GB for OS). "+
-						"Close other apps, lower n_ctx, enable KV quantisation, "+
-						"or set ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1 to bypass.",
-					float64(modelBytes)/1024/1024/1024,
-					projectorEstimate,
-					float64(kvBytes)/1024/1024/1024,
-					float64(needed)/1024/1024/1024,
-					float64(avail)/1024/1024/1024,
-					float64(total)/1024/1024/1024,
-				)
-			}
-			if availBudget > 0 && needed > availBudget {
-				slog.Warn(
-					"model load exceeds current available RAM but fits total budget; allowing load",
-					"id", id,
-					"needed_gb", float64(needed)/1024/1024/1024,
-					"available_gb", float64(avail)/1024/1024/1024,
-					"total_gb", float64(total)/1024/1024/1024,
-				)
-			}
-		}
+	modelBytes := int64(0)
+	if st, statErr := os.Stat(entry.FilePath); statErr == nil {
+		modelBytes = st.Size()
 	}
-
-	if m.scheduler != nil {
-		return m.scheduler.LoadModel(ctx, id, entry.FilePath, opts)
+	planner := m.loadPlanner
+	if planner == nil {
+		planner = NewLoadPlanner()
 	}
-	if err := ctx.Err(); err != nil {
+	plan, err := planner.Plan(LoadPlanRequest{
+		Options:         opts,
+		ModelBytes:      modelBytes,
+		ProjectorBytes:  projectorBytes,
+		Family:          modelFamily(entry),
+		Vision:          projectorBytes > 0,
+		AllowOvercommit: os.Getenv("ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT") == "1",
+	})
+	if err != nil {
 		return err
 	}
-	return m.engine.LoadModel(id, entry.FilePath, opts)
+	selected := plan.Attempts[0]
+	slog.Info("model load plan",
+		"id", id,
+		"attempts", len(plan.Attempts),
+		"adjustment", selected.Adjustment,
+		"ctx_size", selected.Options.CtxSize,
+		"batch_size", selected.Options.BatchSize,
+		"type_k", normalizeKVName(selected.Options.TypeK),
+		"type_v", normalizeKVName(selected.Options.TypeV),
+		"estimated_gb", bytesInGiB(selected.Estimate.TotalBytes),
+		"available_gb", bytesInGiB(plan.AvailableMemory),
+		"budget_gb", bytesInGiB(plan.SafetyBudget),
+	)
+
+	attempts := make([]engine.LoadOptions, 0, len(plan.Attempts))
+	for _, attempt := range plan.Attempts {
+		attempts = append(attempts, attempt.Options)
+	}
+	if m.scheduler != nil {
+		_, err = m.scheduler.LoadModelAttempts(ctx, id, entry.FilePath, attempts)
+		return err
+	}
+	_, err = loadModelWithAttempts(ctx, m.engine, id, entry.FilePath, attempts)
+	return err
 }
 
 func mmprojSize(path string) (int64, error) {

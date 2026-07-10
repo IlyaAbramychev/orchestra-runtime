@@ -518,6 +518,9 @@ func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	// One-click loads receive the model profile; explicit request fields below
 	// remain authoritative for advanced users and automation.
 	opts := h.manager.DefaultLoadOptionsForModel(id)
+	if req.AutoFit != nil {
+		opts.DisableAutoFit = !*req.AutoFit
+	}
 
 	if req.GPULayers != nil {
 		opts.GPULayers = *req.GPULayers
@@ -527,9 +530,11 @@ func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ContextSize != nil {
 		opts.CtxSize = *req.ContextSize
+		opts.CtxSizeExplicit = true
 	}
 	if req.BatchSize != nil {
 		opts.BatchSize = *req.BatchSize
+		opts.BatchExplicit = true
 	}
 	if req.RopeFreqBase != nil {
 		opts.RopeFreqBase = float32(*req.RopeFreqBase)
@@ -549,9 +554,11 @@ func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.KVCacheQuantK != nil {
 		opts.TypeK = *req.KVCacheQuantK
+		opts.TypeKExplicit = true
 	}
 	if req.KVCacheQuantV != nil {
 		opts.TypeV = *req.KVCacheQuantV
+		opts.TypeVExplicit = true
 	}
 	if req.UseMmap != nil {
 		opts.UseMmap = *req.UseMmap

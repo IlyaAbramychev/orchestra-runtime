@@ -91,6 +91,10 @@ type OllamaPullResponse struct {
 // llama.cpp CLI where possible so users familiar with llama-server recognise
 // them.
 type LoadModelRequest struct {
+	// Automatic memory fitting is enabled by default. Set false to require the
+	// exact supplied/default profile and return an error when it cannot load.
+	AutoFit *bool `json:"auto_fit,omitempty"`
+
 	// Hardware
 	GPULayers *int `json:"gpu_layers,omitempty"` // -1 = all available (default)
 	Threads   *int `json:"threads,omitempty"`    // 0 = auto

@@ -9,17 +9,19 @@ import (
 )
 
 type Config struct {
-	Port             string
-	ModelsDir        string
-	ConfigDir        string
-	DefaultGPULayers int
-	ContextSize      int
-	Threads          int
-	MaxQueueSize     int
-	CORSOrigins      []string
-	ShutdownTimeout  time.Duration
-	APIKey           string
-	LogLevel         string
+	Port                string
+	ModelsDir           string
+	ConfigDir           string
+	DefaultGPULayers    int
+	ContextSize         int
+	ContextSizeExplicit bool
+	AutoFit             bool
+	Threads             int
+	MaxQueueSize        int
+	CORSOrigins         []string
+	ShutdownTimeout     time.Duration
+	APIKey              string
+	LogLevel            string
 	// IdleTimeout: auto-unload the model after this duration without use.
 	// Zero disables the watcher. Inspired by Ollama's OLLAMA_KEEP_ALIVE.
 	IdleTimeout  time.Duration
@@ -40,23 +42,30 @@ func Load() *Config {
 	os.MkdirAll(modelsDir, 0755)
 
 	return &Config{
-		Port:             getEnv("ORCHESTRA_PORT", getEnv("PORT", "8100")),
-		ModelsDir:        modelsDir,
-		ConfigDir:        configDir,
-		DefaultGPULayers: getEnvInt("ORCHESTRA_GPU_LAYERS", -1),
-		ContextSize:      getEnvInt("ORCHESTRA_CTX_SIZE", 4096),
-		Threads:          getEnvInt("ORCHESTRA_THREADS", runtime.NumCPU()),
-		MaxQueueSize:     getEnvInt("ORCHESTRA_MAX_QUEUE", 64),
-		CORSOrigins:      splitEnv("CORS_ORIGINS", ",", []string{"http://localhost:3000", "http://localhost:3002", "http://localhost:5173"}),
-		ShutdownTimeout:  time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", 30)) * time.Second,
-		APIKey:           getEnv("ORCHESTRA_API_KEY", ""),
-		LogLevel:         getEnv("LOG_LEVEL", "info"),
+		Port:                getEnv("ORCHESTRA_PORT", getEnv("PORT", "8100")),
+		ModelsDir:           modelsDir,
+		ConfigDir:           configDir,
+		DefaultGPULayers:    getEnvInt("ORCHESTRA_GPU_LAYERS", -1),
+		ContextSize:         getEnvInt("ORCHESTRA_CTX_SIZE", 4096),
+		ContextSizeExplicit: envIsSet("ORCHESTRA_CTX_SIZE"),
+		AutoFit:             getEnvBool("ORCHESTRA_AUTO_FIT", true),
+		Threads:             getEnvInt("ORCHESTRA_THREADS", runtime.NumCPU()),
+		MaxQueueSize:        getEnvInt("ORCHESTRA_MAX_QUEUE", 64),
+		CORSOrigins:         splitEnv("CORS_ORIGINS", ",", []string{"http://localhost:3000", "http://localhost:3002", "http://localhost:5173"}),
+		ShutdownTimeout:     time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", 30)) * time.Second,
+		APIKey:              getEnv("ORCHESTRA_API_KEY", ""),
+		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		// 10 min default — same as Ollama's default KEEP_ALIVE.
 		// Set ORCHESTRA_IDLE_TIMEOUT_SECONDS=0 to disable.
 		IdleTimeout:  time.Duration(getEnvInt("ORCHESTRA_IDLE_TIMEOUT_SECONDS", 600)) * time.Second,
 		MMProjPath:   getEnv("ORCHESTRA_MMPROJ_PATH", ""),
 		MMProjUseGPU: getEnvBool("ORCHESTRA_MMPROJ_USE_GPU", true),
 	}
+}
+
+func envIsSet(key string) bool {
+	_, ok := os.LookupEnv(key)
+	return ok
 }
 
 func getEnv(key, fallback string) string {

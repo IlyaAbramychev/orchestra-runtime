@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -19,12 +20,15 @@ type fakeBackend struct {
 	unloaded           chan struct{}
 	loadedID           string
 	completedWithModel string
+	loadErrors         []error
+	loadOptions        []engine.LoadOptions
 }
 
 func (f *fakeBackend) InitBackend() {}
 func (f *fakeBackend) FreeBackend() {}
 func (f *fakeBackend) Close() error { return nil }
-func (f *fakeBackend) LoadModel(string, string, engine.LoadOptions) error {
+func (f *fakeBackend) LoadModel(_ string, _ string, opts engine.LoadOptions) error {
+	f.loadOptions = append(f.loadOptions, opts)
 	if f.loadStart != nil {
 		select {
 		case f.loadStart <- struct{}{}:
@@ -34,7 +38,47 @@ func (f *fakeBackend) LoadModel(string, string, engine.LoadOptions) error {
 	if f.loadBlock != nil {
 		<-f.loadBlock
 	}
+	if len(f.loadErrors) > 0 {
+		err := f.loadErrors[0]
+		f.loadErrors = f.loadErrors[1:]
+		return err
+	}
 	return nil
+}
+
+func TestSchedulerRetriesMemoryFailureWithinSingleLifecycleSlot(t *testing.T) {
+	backend := &fakeBackend{loadErrors: []error{errors.New("backend out of memory"), nil}}
+	scheduler := NewRuntimeScheduler(backend, 2)
+	first := engine.DefaultLoadOptions()
+	first.CtxSize = 32768
+	second := first
+	second.CtxSize = 4096
+	second.TypeK = "q8_0"
+	second.TypeV = "q8_0"
+
+	selected, err := scheduler.LoadModelAttempts(context.Background(), "model", "/tmp/model.gguf", []engine.LoadOptions{first, second})
+	if err != nil {
+		t.Fatalf("LoadModelAttempts: %v", err)
+	}
+	if selected.CtxSize != second.CtxSize || len(backend.loadOptions) != 2 {
+		t.Fatalf("selected=%+v attempts=%d; want second profile after two attempts", selected, len(backend.loadOptions))
+	}
+}
+
+func TestSchedulerDoesNotRetryNonMemoryFailure(t *testing.T) {
+	backend := &fakeBackend{loadErrors: []error{errors.New("unsupported model format")}}
+	scheduler := NewRuntimeScheduler(backend, 2)
+	first := engine.DefaultLoadOptions()
+	second := first
+	second.CtxSize = 2048
+
+	_, err := scheduler.LoadModelAttempts(context.Background(), "model", "/tmp/model.gguf", []engine.LoadOptions{first, second})
+	if err == nil || !strings.Contains(err.Error(), "unsupported model format") {
+		t.Fatalf("expected original error, got %v", err)
+	}
+	if len(backend.loadOptions) != 1 {
+		t.Fatalf("non-memory failure retried %d times", len(backend.loadOptions))
+	}
 }
 func (f *fakeBackend) UnloadModel() {
 	if f.unloaded != nil {

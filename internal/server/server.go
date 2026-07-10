@@ -240,6 +240,8 @@ func defaultLoadOptionsFromConfig(cfg *config.Config) engine.LoadOptions {
 	opts := engine.DefaultLoadOptions()
 	opts.GPULayers = cfg.DefaultGPULayers
 	opts.CtxSize = cfg.ContextSize
+	opts.CtxSizeExplicit = cfg.ContextSizeExplicit
+	opts.DisableAutoFit = !cfg.AutoFit
 	opts.Threads = cfg.Threads
 	opts.MMProjPath = cfg.MMProjPath
 	opts.MMProjUseGPU = cfg.MMProjUseGPU

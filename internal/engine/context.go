@@ -197,20 +197,29 @@ type LoadOptions struct {
 	TypeV         string
 	MMProjPath    string
 	MMProjUseGPU  bool
+
+	// Load planning policy. These fields stay on the host and are ignored by
+	// the native engine/worker RPC. They let the service distinguish a user's
+	// deliberate tuning from defaults that may be reduced after an OOM.
+	DisableAutoFit  bool
+	CtxSizeExplicit bool
+	BatchExplicit   bool
+	TypeKExplicit   bool
+	TypeVExplicit   bool
 }
 
 // DefaultLoadOptions returns the set of values we use when callers pass zero
 // or a legacy signature. Matches the old behaviour prior to the expanded API.
 func DefaultLoadOptions() LoadOptions {
 	return LoadOptions{
-		GPULayers:  -1,
-		CtxSize:    4096,
-		Threads:    0,
-		BatchSize:  1024,
-		FlashAttn:  -1, // auto
-		OffloadKQV: true,
-		UseMmap:    true,
-		UseMlock:   false,
+		GPULayers:    -1,
+		CtxSize:      4096,
+		Threads:      0,
+		BatchSize:    1024,
+		FlashAttn:    -1, // auto
+		OffloadKQV:   true,
+		UseMmap:      true,
+		UseMlock:     false,
 		MMProjUseGPU: true,
 	}
 }

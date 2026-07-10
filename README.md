@@ -57,6 +57,9 @@ make build-cpu
 | `ORCHESTRA_PORT` | `8100` | Порт HTTP-сервера |
 | `ORCHESTRA_MODELS_DIR` | `~/.orchestra/models` | Каталог с .gguf |
 | `ORCHESTRA_LOG_LEVEL` | `info` | `debug` / `info` / `warn` |
+| `ORCHESTRA_CTX_SIZE` | `4096` | Явный runtime-wide `n_ctx`; planner не уменьшает заданное значение |
+| `ORCHESTRA_AUTO_FIT` | `1` | Автоматически подбирает batch, KV cache и context при нехватке памяти |
+| `ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT` | `0` | Отключает preflight RAM budget для ручной диагностики |
 
 ---
 
@@ -90,6 +93,12 @@ curl -X POST :8100/api/models/qwen2.5-coder-7b-q4/load \
 ```
 
 `gpu_layers: -1` = все слои на GPU. `context_size` — n_ctx.
+
+При загрузке без тела runtime строит безопасный профиль автоматически. Если
+backend действительно вернул OOM, загрузка повторяется с последовательно более
+лёгкими `n_batch`, KV cache и context-профилями. Явно переданные
+`context_size`, `batch_size`, `kv_cache_quant_k` и `kv_cache_quant_v` planner не
+меняет. Для полностью ручного режима передайте `"auto_fit": false`.
 
 ### Чат (OpenAI-совместимо)
 

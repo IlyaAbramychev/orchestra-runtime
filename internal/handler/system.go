@@ -78,6 +78,7 @@ func (h *SystemHandler) Capabilities(w http.ResponseWriter, r *http.Request) {
 		Features: []model.FeatureCapability{
 			{Name: "chat", Status: "supported"},
 			{Name: "generate", Status: "supported"},
+			{Name: "automatic_memory_fitting", Status: "supported", Notes: "preflight planning plus bounded OOM retry; explicit context, batch, and KV settings are preserved", Details: map[string]any{"disableField": "auto_fit", "disableEnv": "ORCHESTRA_AUTO_FIT", "maxAttempts": service.MaxAdaptiveLoadAttempts}},
 			{Name: "embeddings", Status: "supported", Notes: "Supports encoding_format='float' (default), 'base64'; supports dimensions truncation; stable error.code available"},
 			{Name: "registry_pull", Status: "supported"},
 			{Name: "direct_gguf_pull", Status: "extension"},

@@ -83,6 +83,9 @@ func TestCapabilitiesReportsFeatureSupport(t *testing.T) {
 	if features["direct_gguf_pull"] != "extension" {
 		t.Fatalf("direct_gguf_pull = %q", features["direct_gguf_pull"])
 	}
+	if features["automatic_memory_fitting"] != "supported" {
+		t.Fatalf("automatic_memory_fitting = %q", features["automatic_memory_fitting"])
+	}
 	if features["grammar_constrained_decoding"] != "supported" {
 		t.Fatalf("grammar_constrained_decoding = %q", features["grammar_constrained_decoding"])
 	}
