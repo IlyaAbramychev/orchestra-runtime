@@ -127,6 +127,11 @@ curl -X POST :8100/api/models/import \
 Рекурсивно сканирует каталог на .gguf и регистрирует их в каталоге моделей
 **без копирования** — просто добавляет ссылки.
 
+При импорте runtime читает GGUF metadata без загрузки tensor data: architecture,
+training context, embedding length и встроенный chat template. Поддержка tools,
+thinking и vision определяется по metadata/template и парному mmproj; имя файла
+используется только как fallback для старых или неполных GGUF.
+
 ### Состояние сервера
 
 ```bash

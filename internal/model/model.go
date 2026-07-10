@@ -15,6 +15,8 @@ type ModelInfo struct {
 	Quantization        string                   `json:"quantization,omitempty"`
 	Family              string                   `json:"family,omitempty"`
 	Parameters          string                   `json:"parameters,omitempty"`
+	TrainingContext     int                      `json:"training_context,omitempty"`
+	EmbeddingLength     int                      `json:"embedding_length,omitempty"`
 	Modelfile           string                   `json:"modelfile,omitempty"`
 	Template            string                   `json:"template,omitempty"`
 	System              string                   `json:"system,omitempty"`
@@ -38,6 +40,7 @@ type ModelCapabilities struct {
 	Rerank     bool `json:"rerank"`
 	Tools      bool `json:"tools"`
 	Thinking   bool `json:"thinking"`
+	Vision     bool `json:"vision,omitempty"`
 }
 
 type RecommendedModelSettings struct {

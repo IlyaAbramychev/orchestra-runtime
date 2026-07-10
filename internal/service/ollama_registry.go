@@ -447,7 +447,7 @@ func (m *ModelManager) ollamaManifestEntry(
 	capabilities := inferModelCapabilities(ref.Name, filename)
 	settings := inferRecommendedSettings(meta)
 
-	return &storage.ModelEntry{
+	entry := &storage.ModelEntry{
 		ID:                  uuid.New().String(),
 		Name:                ref.Name,
 		Filename:            filename,
@@ -469,6 +469,8 @@ func (m *ModelManager) ollamaManifestEntry(
 		FilePath:            layerPaths[modelLayer.Digest],
 		DownloadedAt:        time.Now().UTC(),
 	}
+	normalizeModelMetadata(entry)
+	return entry
 }
 
 func safeOllamaModelFilename(name string) string {

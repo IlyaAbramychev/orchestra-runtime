@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/model"
@@ -164,7 +165,11 @@ func (s *InferenceService) Generate(
 	images []string,
 	params engine.CompletionParams,
 ) (*engine.CompletionResult, error) {
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, "chat")
+	capability := "chat"
+	if len(images) > 0 {
+		capability = "vision"
+	}
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +188,11 @@ func (s *InferenceService) GenerateStream(
 	images []string,
 	params engine.CompletionParams,
 ) (<-chan engine.CompletionChunk, error) {
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, "chat")
+	capability := "chat"
+	if len(images) > 0 {
+		capability = "vision"
+	}
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +225,11 @@ func buildGenerateMessages(prompt, system string, images []string, params *engin
 
 // Complete runs a non-streaming chat completion.
 func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompletionRequest) (*engine.CompletionResult, error) {
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, "chat")
+	capability := "chat"
+	if chatRequestHasImages(req.Messages) {
+		capability = "vision"
+	}
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +244,11 @@ func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompleti
 
 // CompleteStream runs a streaming chat completion.
 func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCompletionRequest) (<-chan engine.CompletionChunk, error) {
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, "chat")
+	capability := "chat"
+	if chatRequestHasImages(req.Messages) {
+		capability = "vision"
+	}
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +264,20 @@ func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCo
 	}
 
 	return forwardCompletionChunks(ctx, ch, release), nil
+}
+
+func chatRequestHasImages(messages []model.ChatMessage) bool {
+	for _, message := range messages {
+		if len(message.Images) > 0 {
+			return true
+		}
+		for _, part := range message.Parts {
+			if part.Type == "image_url" && strings.TrimSpace(part.ImageURL) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func toEngineMessages(msgs []model.ChatMessage) []engine.ChatMessage {

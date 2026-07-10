@@ -741,6 +741,23 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 	if parameters == "" {
 		parameters = buildShowParameters(entry.StopTokens)
 	}
+	modelInfo := map[string]any{
+		"general.name":       entry.Name,
+		"general.size_bytes": entry.Size,
+		"general.file_path":  entry.FilePath,
+		"general.sha256":     entry.SHA256,
+		"general.source_url": entry.SourceURL,
+		"general.mmproj":     entry.MMProjFilename,
+	}
+	if entry.TrainingContext > 0 {
+		modelInfo["general.architecture"] = entry.Family
+		modelInfo["general.training_context"] = entry.TrainingContext
+		modelInfo[entry.Family+".context_length"] = entry.TrainingContext
+	}
+	if entry.EmbeddingLength > 0 {
+		modelInfo["general.embedding_length"] = entry.EmbeddingLength
+		modelInfo[entry.Family+".embedding_length"] = entry.EmbeddingLength
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"modelfile":  modelfile,
 		"parameters": parameters,
@@ -756,14 +773,7 @@ func (h *ModelsHandler) Show(w http.ResponseWriter, r *http.Request) {
 		"capabilities":         toModelCapabilities(entry.Capabilities),
 		"stop_tokens":          entry.StopTokens,
 		"recommended_settings": toRecommendedSettings(entry.RecommendedSettings),
-		"model_info": map[string]any{
-			"general.name":       entry.Name,
-			"general.size_bytes": entry.Size,
-			"general.file_path":  entry.FilePath,
-			"general.sha256":     entry.SHA256,
-			"general.source_url": entry.SourceURL,
-			"general.mmproj":     entry.MMProjFilename,
-		},
+		"model_info":           modelInfo,
 	})
 }
 
@@ -818,6 +828,8 @@ func toModelInfo(e *storage.ModelEntry) model.ModelInfo {
 		Quantization:        e.Quantization,
 		Family:              e.Family,
 		Parameters:          e.Parameters,
+		TrainingContext:     e.TrainingContext,
+		EmbeddingLength:     e.EmbeddingLength,
 		Modelfile:           e.Modelfile,
 		Template:            e.Template,
 		System:              e.System,
@@ -843,6 +855,7 @@ func toModelCapabilities(c storage.ModelCapabilities) model.ModelCapabilities {
 		Rerank:     c.Rerank,
 		Tools:      c.Tools,
 		Thinking:   c.Thinking,
+		Vision:     c.Vision,
 	}
 }
 
@@ -856,6 +869,7 @@ func toStorageCapabilitiesPtr(c *model.ModelCapabilities) *storage.ModelCapabili
 		Rerank:     c.Rerank,
 		Tools:      c.Tools,
 		Thinking:   c.Thinking,
+		Vision:     c.Vision,
 	}
 }
 

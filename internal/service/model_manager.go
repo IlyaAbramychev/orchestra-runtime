@@ -112,6 +112,7 @@ func (m *ModelManager) DefaultLoadOptions() engine.LoadOptions {
 func (m *ModelManager) DefaultLoadOptionsForModel(id string) engine.LoadOptions {
 	opts := m.DefaultLoadOptions()
 	entry := m.registry.Get(id)
+	entry = cloneModelEntry(entry)
 	if entry == nil || entry.RecommendedSettings.ContextSize <= 0 {
 		return opts
 	}
@@ -184,11 +185,23 @@ func cloneModelEntry(entry *storage.ModelEntry) *storage.ModelEntry {
 }
 
 func normalizeModelMetadata(entry *storage.ModelEntry) {
-	if entry.Capabilities == (storage.ModelCapabilities{}) {
+	if entry.MMProjFilename == "" {
+		if discovery := discoverMMProjFilename(entry.FilePath); discovery.filename != "" {
+			entry.MMProjFilename = discovery.filename
+		}
+	}
+	metadataAvailable := enrichModelEntryFromGGUF(entry)
+	if !metadataAvailable && entry.Capabilities == (storage.ModelCapabilities{}) {
 		entry.Capabilities = inferModelCapabilities(entry.Name, entry.Filename)
+	}
+	if entry.MMProjFilename != "" {
+		entry.Capabilities.Vision = true
 	}
 	if entry.RecommendedSettings == (storage.RecommendedModelSettings{}) {
 		entry.RecommendedSettings = inferRecommendedSettings(modelMeta{parameters: entry.Parameters})
+	}
+	if entry.TrainingContext > 0 && entry.RecommendedSettings.ContextSize > entry.TrainingContext {
+		entry.RecommendedSettings.ContextSize = entry.TrainingContext
 	}
 }
 
@@ -329,7 +342,7 @@ func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability stri
 	if err != nil {
 		return err
 	}
-	if err := requireModelCapability(entry, capability); err != nil {
+	if err := m.requireModelCapability(entry, capability); err != nil {
 		return err
 	}
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
@@ -343,7 +356,7 @@ func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability stri
 	if err != nil {
 		return err
 	}
-	if err := requireModelCapability(entry, capability); err != nil {
+	if err := m.requireModelCapability(entry, capability); err != nil {
 		return err
 	}
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
@@ -386,10 +399,34 @@ func requireModelCapability(entry *storage.ModelEntry, capability string) error 
 		if normalized.Capabilities.Tools {
 			return nil
 		}
+	case "vision":
+		if normalized.Capabilities.Chat && normalized.Capabilities.Vision {
+			return nil
+		}
 	default:
 		return fmt.Errorf("unsupported model capability %q", capability)
 	}
 	return fmt.Errorf("model %s does not support %s", normalized.Name, capability)
+}
+
+func (m *ModelManager) requireModelCapability(entry *storage.ModelEntry, capability string) error {
+	if capability != "vision" {
+		return requireModelCapability(entry, capability)
+	}
+	if err := requireModelCapability(entry, "chat"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(m.defaultLoadOptions.MMProjPath) != "" {
+		return nil
+	}
+	resolved, err := resolveEntryMMProjPath(entry)
+	if err != nil {
+		return err
+	}
+	if resolved == "" {
+		return fmt.Errorf("multimodal images require a loaded mmproj")
+	}
+	return nil
 }
 
 // PullModel downloads a model from a URL.
@@ -665,6 +702,7 @@ func (m *ModelManager) downloadModelAttempt(ctx context.Context, entry *storage.
 	entry.SHA256 = actualSHA
 	entry.Status = "ready"
 	entry.DownloadedAt = time.Now().UTC()
+	normalizeModelMetadata(entry)
 
 	if err := m.registry.Update(entry); err != nil {
 		slog.Error("update registry after download", "error", err)
@@ -841,6 +879,7 @@ func (m *ModelManager) ImportFromDirectory(dir string) ([]*storage.ModelEntry, e
 			DownloadedAt:        info.ModTime().UTC(),
 			External:            true,
 		}
+		normalizeModelMetadata(entry)
 
 		if err := m.registry.Add(entry); err != nil {
 			slog.Warn("failed to register imported model", "path", path, "error", err)
@@ -905,6 +944,7 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 	if err != nil {
 		return err
 	}
+	normalizedEntry := cloneModelEntry(entry)
 
 	modelBytes := int64(0)
 	if st, statErr := os.Stat(entry.FilePath); statErr == nil {
@@ -918,8 +958,9 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 		Options:         opts,
 		ModelBytes:      modelBytes,
 		ProjectorBytes:  projectorBytes,
-		Family:          modelFamily(entry),
-		Vision:          projectorBytes > 0,
+		Family:          modelFamily(normalizedEntry),
+		Vision:          projectorBytes > 0 || normalizedEntry.Capabilities.Vision,
+		TrainingContext: normalizedEntry.TrainingContext,
 		AllowOvercommit: os.Getenv("ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT") == "1",
 	})
 	if err != nil {

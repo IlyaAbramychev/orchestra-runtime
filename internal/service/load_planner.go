@@ -32,6 +32,7 @@ type LoadPlanRequest struct {
 	ProjectorBytes  int64
 	Family          string
 	Vision          bool
+	TrainingContext int
 	AllowOvercommit bool
 }
 
@@ -66,6 +67,12 @@ func NewLoadPlanner() *LoadPlanner {
 
 func (p *LoadPlanner) Plan(req LoadPlanRequest) (LoadPlan, error) {
 	base := normalizePlannedOptions(req.Options)
+	if !base.CtxSizeExplicit && req.TrainingContext > 0 && base.CtxSize > req.TrainingContext {
+		base.CtxSize = req.TrainingContext
+		if !base.BatchExplicit && base.BatchSize > base.CtxSize {
+			base.BatchSize = base.CtxSize
+		}
+	}
 	total := p.totalRAM()
 	available := p.availableRAM()
 	budget := total - p.reservedBytes

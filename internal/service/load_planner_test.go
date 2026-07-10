@@ -132,3 +132,42 @@ func TestLoadPlannerRetryAttemptsStrictlyDecreaseMemory(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadPlannerClampsAutomaticContextToGGUFTrainingContext(t *testing.T) {
+	planner := fixedMemoryPlanner(24*testGiB, 10*testGiB)
+	opts := engine.DefaultLoadOptions()
+	opts.CtxSize = 8192
+
+	plan, err := planner.Plan(LoadPlanRequest{
+		Options:         opts,
+		ModelBytes:      1 * testGiB,
+		Family:          "llama",
+		TrainingContext: 2048,
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := plan.Attempts[0].Options.CtxSize; got != 2048 {
+		t.Fatalf("automatic context = %d; want training context 2048", got)
+	}
+}
+
+func TestLoadPlannerAllowsExplicitContextBeyondGGUFTrainingContext(t *testing.T) {
+	planner := fixedMemoryPlanner(24*testGiB, 10*testGiB)
+	opts := engine.DefaultLoadOptions()
+	opts.CtxSize = 8192
+	opts.CtxSizeExplicit = true
+
+	plan, err := planner.Plan(LoadPlanRequest{
+		Options:         opts,
+		ModelBytes:      1 * testGiB,
+		Family:          "llama",
+		TrainingContext: 2048,
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := plan.Attempts[0].Options.CtxSize; got != 8192 {
+		t.Fatalf("explicit context = %d; want 8192", got)
+	}
+}
