@@ -154,6 +154,11 @@ test:
 lint:
 	go vet ./...
 
+.PHONY: parity
+parity:
+	@test -n "$(ORCHESTRA_PARITY_GGUF)" || (echo "Set ORCHESTRA_PARITY_GGUF=/absolute/path/model.gguf" && exit 1)
+	ORCHESTRA_PARITY_GGUF="$(ORCHESTRA_PARITY_GGUF)" scripts/parity-ollama-runtime.sh
+
 .PHONY: install
 install:
 	@test -x "$(BUILD_DIR)/$(BINARY)" || (echo "Missing $(BUILD_DIR)/$(BINARY); run make build-metal, build-cuda, or build-cpu first" && exit 1)
@@ -191,6 +196,7 @@ help:
 	@echo "  make run           Run in development mode"
 	@echo "  make install       Install both built binaries to ~/.orchestra/bin"
 	@echo "  make test          Run tests"
+	@echo "  make parity        Compare Ollama and runtime on one source GGUF"
 	@echo "  make clean         Clean build artifacts"
 	@echo "  make submodule-init  Initialize llama.cpp submodule"
 	@echo "  make help          Show this help"

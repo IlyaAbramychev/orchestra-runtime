@@ -64,7 +64,7 @@ func TestOllamaCompatibilitySmokeSuite(t *testing.T) {
 		smokeJSON(t, server.URL, http.MethodPost, "/api/chat",
 			`{"model":"chat-smoke:latest","stream":false,"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"call tool"}]}`,
 			http.StatusOK, &resp)
-		if resp.DoneReason != "tool_calls" || len(resp.Message.ToolCalls) != 1 {
+		if resp.DoneReason != "stop" || len(resp.Message.ToolCalls) != 1 {
 			t.Fatalf("unexpected tool response: %+v", resp)
 		}
 		if resp.Message.ToolCalls[0].Function.Name != "get_weather" {
@@ -74,7 +74,7 @@ func TestOllamaCompatibilitySmokeSuite(t *testing.T) {
 
 	t.Run("chat tool calls stream", func(t *testing.T) {
 		chunks := smokeChatStream(t, server.URL, `{"model":"chat-smoke:latest","tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"call tool stream"}]}`)
-		if len(chunks) != 2 || len(chunks[0].Message.ToolCalls) != 1 || chunks[1].DoneReason != "tool_calls" {
+		if len(chunks) != 2 || len(chunks[0].Message.ToolCalls) != 1 || chunks[1].DoneReason != "stop" {
 			t.Fatalf("unexpected streaming tool chunks: %+v", chunks)
 		}
 	})

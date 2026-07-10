@@ -27,8 +27,7 @@ type ModelRequestDefaults struct {
 
 // ModelLoader resolves and loads a model for request-scoped auto-load.
 type ModelLoader interface {
-	EnsureLoaded(ctx context.Context, model string) error
-	EnsureLoadedFor(ctx context.Context, model, capability string) error
+	EnsureLoadedForCapabilities(ctx context.Context, model string, capabilities []string) error
 	ResolveModelID(model string) (string, error)
 	DefaultsForModel(model string) (ModelRequestDefaults, error)
 }
@@ -59,8 +58,11 @@ func acquireLoadedModel(
 	backend engine.Backend,
 	loader ModelLoader,
 	model string,
-	capability string,
+	capabilities ...string,
 ) (func(), error) {
+	if len(capabilities) == 0 {
+		capabilities = []string{"chat"}
+	}
 	for {
 		expectedModelID := ""
 		if loader != nil && model != "" {
@@ -69,7 +71,7 @@ func acquireLoadedModel(
 				return nil, err
 			}
 			expectedModelID = resolvedID
-			if err := loader.EnsureLoadedFor(ctx, model, capability); err != nil {
+			if err := loader.EnsureLoadedForCapabilities(ctx, model, capabilities); err != nil {
 				return nil, err
 			}
 		} else if !backend.IsLoaded() {
@@ -225,11 +227,7 @@ func buildGenerateMessages(prompt, system string, images []string, params *engin
 
 // Complete runs a non-streaming chat completion.
 func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompletionRequest) (*engine.CompletionResult, error) {
-	capability := "chat"
-	if chatRequestHasImages(req.Messages) {
-		capability = "vision"
-	}
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, capability)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, chatRequestCapabilities(req)...)
 	if err != nil {
 		return nil, err
 	}
@@ -244,11 +242,7 @@ func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompleti
 
 // CompleteStream runs a streaming chat completion.
 func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCompletionRequest) (<-chan engine.CompletionChunk, error) {
-	capability := "chat"
-	if chatRequestHasImages(req.Messages) {
-		capability = "vision"
-	}
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, capability)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, chatRequestCapabilities(req)...)
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +258,21 @@ func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCo
 	}
 
 	return forwardCompletionChunks(ctx, ch, release), nil
+}
+
+func chatRequestCapabilities(req *model.ChatCompletionRequest) []string {
+	capabilities := []string{"chat"}
+	if len(req.Tools) > 0 {
+		capabilities = append(capabilities, "tools")
+	}
+	if (len(req.Think) > 0 && thinkEnabled(req.Think)) ||
+		(req.ReasoningEffort != "" && req.ReasoningEffort != "none") {
+		capabilities = append(capabilities, "thinking")
+	}
+	if chatRequestHasImages(req.Messages) {
+		capabilities = append(capabilities, "vision")
+	}
+	return capabilities
 }
 
 func chatRequestHasImages(messages []model.ChatMessage) bool {

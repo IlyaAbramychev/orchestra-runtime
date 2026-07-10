@@ -599,3 +599,73 @@ func TestInferenceAppliesModelChatTemplateByDefault(t *testing.T) {
 		t.Fatalf("expected model chat template, got %q", backend.lastParams.ChatTemplate)
 	}
 }
+
+func TestInferenceRejectsUnsupportedToolAndThinkingRequestsBeforeLoad(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "plain-chat.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:       "plain-chat-1",
+		Name:     "plain-chat",
+		Filename: "plain-chat.gguf",
+		Status:   "ready",
+		FilePath: modelPath,
+		Capabilities: storage.ModelCapabilities{
+			Chat: true,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	tests := []struct {
+		name string
+		req  *model.ChatCompletionRequest
+		want string
+	}{
+		{
+			name: "tools",
+			req: &model.ChatCompletionRequest{
+				Model:    "plain-chat",
+				Messages: []model.ChatMessage{{Role: "user", Content: "use a tool"}},
+				Tools: []model.ToolDefinition{{
+					Type:     "function",
+					Function: model.ToolFunction{Name: "read_file"},
+				}},
+			},
+			want: "does not support tools",
+		},
+		{
+			name: "thinking",
+			req: &model.ChatCompletionRequest{
+				Model:    "plain-chat",
+				Messages: []model.ChatMessage{{Role: "user", Content: "think"}},
+				Think:    []byte("true"),
+			},
+			want: "does not support thinking",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := inference.Complete(context.Background(), tt.req)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v; want %q", err, tt.want)
+			}
+		})
+	}
+	if backend.loads != 0 {
+		t.Fatalf("unsupported requests loaded the model %d times", backend.loads)
+	}
+}

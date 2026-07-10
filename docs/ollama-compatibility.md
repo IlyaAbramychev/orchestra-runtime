@@ -97,6 +97,16 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   mixed raw-base64 and `data:` URI image payloads plus multi-image requests;
   optionally set `ORCHESTRA_TEST_BAD_MMPROJ_PATH` to verify
   projector/model mismatch failures.
+- `scripts/parity-ollama-runtime.sh` runs Ollama and Orchestra against one
+  source GGUF with identical context, sampling, tools, and optional
+  mmproj/image input. It records source and materialized SHA-256 values, raw
+  responses, capability errors, and a machine-readable `report.json`. Provider
+  phases are sequential so unified-memory pressure does not bias VLM results.
+- Requests for tools or thinking are rejected before model load when GGUF
+  metadata says the model does not support that capability, matching Ollama's
+  model-scoped capability gate. Ollama `/api/chat` tool calls use
+  `done_reason: "stop"`; OpenAI-compatible responses continue to use
+  `finish_reason: "tool_calls"`.
 - `/api/delete` resolves model id, display name, filename, or filename stem.
 - Durations in chat and generate responses are returned in nanoseconds.
 

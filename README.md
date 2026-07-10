@@ -132,6 +132,23 @@ training context, embedding length и встроенный chat template. Под
 thinking и vision определяется по metadata/template и парному mmproj; имя файла
 используется только как fallback для старых или неполных GGUF.
 
+### Parity с Ollama
+
+Для воспроизводимого сравнения запустите Ollama и Orchestra Runtime, затем
+передайте один исходный GGUF обоим runtime:
+
+```bash
+ORCHESTRA_PARITY_GGUF=/absolute/path/model.gguf \
+ORCHESTRA_PARITY_N_CTX=4096 \
+make parity
+```
+
+Для VLM дополнительно задайте `ORCHESTRA_PARITY_MMPROJ` и
+`ORCHESTRA_PARITY_IMAGE`. Harness проверяет source SHA-256, одинаковые context,
+sampling и tools, выполняет chat/tools/thinking/vision сценарии и сохраняет
+сырые ответы вместе с `report.json`. Ollama и Orchestra запускаются отдельными
+фазами, поэтому две копии VLM не конкурируют за unified memory.
+
 ### Состояние сервера
 
 ```bash

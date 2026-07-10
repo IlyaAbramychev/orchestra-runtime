@@ -272,7 +272,7 @@ func TestOllamaChatToolCallsResponseShape(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.DoneReason != "tool_calls" {
+	if resp.DoneReason != "stop" {
 		t.Fatalf("done reason = %q", resp.DoneReason)
 	}
 	if resp.Message.Content != "" {
@@ -307,7 +307,7 @@ func TestOllamaChatToolsStreamBuffered(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
-	if len(chunks) != 2 || len(chunks[0].Message.ToolCalls) != 1 || chunks[1].DoneReason != "tool_calls" {
+	if len(chunks) != 2 || len(chunks[0].Message.ToolCalls) != 1 || chunks[1].DoneReason != "stop" {
 		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }

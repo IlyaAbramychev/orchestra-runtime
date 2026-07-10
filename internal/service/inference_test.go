@@ -116,9 +116,7 @@ type switchingModelLoader struct {
 	attempts int
 }
 
-func (l *switchingModelLoader) EnsureLoaded(context.Context, string) error { return nil }
-
-func (l *switchingModelLoader) EnsureLoadedFor(_ context.Context, model, _ string) error {
+func (l *switchingModelLoader) EnsureLoadedForCapabilities(_ context.Context, model string, _ []string) error {
 	l.attempts++
 	l.backend.loadedID = model
 	if l.attempts == 1 {

@@ -36,6 +36,7 @@ func TestRuntimeHTTPStatus(t *testing.T) {
 		{"model not found", errModelNotFound, http.StatusNotFound},
 		{"model reference not found", errModelReferenceNotFound, http.StatusNotFound},
 		{"memory safety budget", errors.New("load would exceed RAM safety budget"), http.StatusUnprocessableEntity},
+		{"unsupported model capability", errors.New("model plain-chat does not support thinking"), http.StatusBadRequest},
 		{"unknown", errUnknown, http.StatusInternalServerError},
 	}
 

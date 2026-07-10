@@ -338,11 +338,15 @@ func (m *ModelManager) EnsureLoaded(ctx context.Context, ref string) error {
 }
 
 func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability string) error {
+	return m.EnsureLoadedForCapabilities(ctx, ref, []string{capability})
+}
+
+func (m *ModelManager) EnsureLoadedForCapabilities(ctx context.Context, ref string, capabilities []string) error {
 	entry, err := m.ResolveModel(ref)
 	if err != nil {
 		return err
 	}
-	if err := m.requireModelCapability(entry, capability); err != nil {
+	if err := m.requireModelCapabilities(entry, capabilities); err != nil {
 		return err
 	}
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
@@ -356,13 +360,22 @@ func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability stri
 	if err != nil {
 		return err
 	}
-	if err := m.requireModelCapability(entry, capability); err != nil {
+	if err := m.requireModelCapabilities(entry, capabilities); err != nil {
 		return err
 	}
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
 		return nil
 	}
 	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptionsForModel(entry.ID))
+}
+
+func (m *ModelManager) requireModelCapabilities(entry *storage.ModelEntry, capabilities []string) error {
+	for _, capability := range capabilities {
+		if err := m.requireModelCapability(entry, capability); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *ModelManager) DefaultsForModel(ref string) (ModelRequestDefaults, error) {
@@ -397,6 +410,10 @@ func requireModelCapability(entry *storage.ModelEntry, capability string) error 
 		}
 	case "tools":
 		if normalized.Capabilities.Tools {
+			return nil
+		}
+	case "thinking":
+		if normalized.Capabilities.Thinking {
 			return nil
 		}
 	case "vision":

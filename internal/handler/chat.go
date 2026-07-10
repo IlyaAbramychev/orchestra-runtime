@@ -155,7 +155,7 @@ func (h *ChatHandler) handleOllamaComplete(
 	if hasToolCalls {
 		message.Content = ""
 		message.ToolCalls = toolCalls
-		doneReason = "tool_calls"
+		doneReason = ollamaToolDoneReason(doneReason)
 	}
 
 	resp := model.OllamaChatResponse{
@@ -323,7 +323,7 @@ func (h *ChatHandler) handleOllamaBufferedStream(
 
 	doneReason := final.FinishReason
 	if hasToolCalls {
-		doneReason = "tool_calls"
+		doneReason = ollamaToolDoneReason(doneReason)
 	}
 	writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
 		Model:                req.Model,
@@ -337,6 +337,13 @@ func (h *ChatHandler) handleOllamaBufferedStream(
 		EvalCount:            final.CompletionTokens,
 	})
 	h.inference.ApplyKeepAlive(req.KeepAlive)
+}
+
+func ollamaToolDoneReason(reason string) string {
+	if reason == "" || reason == "tool_calls" {
+		return "stop"
+	}
+	return reason
 }
 
 func writeOllamaChatStreamResponse(w http.ResponseWriter, flusher http.Flusher, resp model.OllamaChatResponse) {

@@ -157,6 +157,8 @@ func runtimeErrorCode(err error) string {
 		strings.Contains(msg, "mmproj context is not loaded"),
 		strings.Contains(msg, "failed to load mmproj"):
 		return "multimodal_configuration_error"
+	case strings.Contains(msg, "does not support"):
+		return "model_capability_unsupported"
 	default:
 		return ""
 	}

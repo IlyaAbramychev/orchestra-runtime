@@ -55,6 +55,11 @@ func TestRuntimeErrorCode(t *testing.T) {
 			want: "memory_budget_exceeded",
 		},
 		{
+			name: "unsupported model capability",
+			err:  errors.New("model plain-chat does not support tools"),
+			want: "model_capability_unsupported",
+		},
+		{
 			name: "unknown error",
 			err:  errors.New("something went wrong"),
 			want: "",
