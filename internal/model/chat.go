@@ -1,13 +1,23 @@
 package model
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // OpenAI-compatible request/response types.
 
 type ChatCompletionRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream,omitempty"`
+	Model             string           `json:"model"`
+	Messages          []ChatMessage    `json:"messages"`
+	Stream            bool             `json:"stream,omitempty"`
+	Tools             []ToolDefinition `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage  `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool            `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort   string           `json:"reasoning_effort,omitempty"`
+	Think             json.RawMessage  `json:"think,omitempty"`
 
 	// Sampling — matches Ollama `options` + OpenAI chat API + LM Studio panel.
 	Temperature      *float64 `json:"temperature,omitempty"`
@@ -38,12 +48,118 @@ type ChatCompletionRequest struct {
 }
 
 type ChatMessage struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	Images    []string   `json:"images,omitempty"`
-	Thinking  string     `json:"thinking,omitempty"`
-	ToolName  string     `json:"tool_name,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string               `json:"role"`
+	Content          string               `json:"content"`
+	Parts            []MessageContentPart `json:"-"`
+	Images           []string             `json:"images,omitempty"`
+	Thinking         string               `json:"thinking,omitempty"`
+	ReasoningContent string               `json:"reasoning_content,omitempty"`
+	ToolName         string               `json:"tool_name,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall           `json:"tool_calls,omitempty"`
+}
+
+type MessageContentPart struct {
+	Type        string
+	Text        string
+	ImageURL    string
+	ImageDetail string
+}
+
+// UnmarshalJSON accepts both the classic string-valued chat content used by
+// Ollama and OpenAI's multimodal content-part array. Parts remain internal so
+// response serialization keeps the existing string-valued content contract.
+func (m *ChatMessage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		Images           []string        `json:"images,omitempty"`
+		Thinking         string          `json:"thinking,omitempty"`
+		ReasoningContent string          `json:"reasoning_content,omitempty"`
+		ToolName         string          `json:"tool_name,omitempty"`
+		ToolCallID       string          `json:"tool_call_id,omitempty"`
+		ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*m = ChatMessage{
+		Role:             raw.Role,
+		Images:           raw.Images,
+		Thinking:         raw.Thinking,
+		ReasoningContent: raw.ReasoningContent,
+		ToolName:         raw.ToolName,
+		ToolCallID:       raw.ToolCallID,
+		ToolCalls:        raw.ToolCalls,
+	}
+	trimmed := bytes.TrimSpace(raw.Content)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		return json.Unmarshal(trimmed, &m.Content)
+	}
+	if trimmed[0] != '[' {
+		return fmt.Errorf("message content must be a string or an array of content parts")
+	}
+
+	var parts []struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text,omitempty"`
+		ImageURL json.RawMessage `json:"image_url,omitempty"`
+	}
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
+		return fmt.Errorf("decode message content parts: %w", err)
+	}
+	var text strings.Builder
+	for i, part := range parts {
+		switch part.Type {
+		case "text":
+			m.Parts = append(m.Parts, MessageContentPart{Type: "text", Text: part.Text})
+			text.WriteString(part.Text)
+		case "image_url":
+			url, detail, err := decodeOpenAIImageURL(part.ImageURL)
+			if err != nil {
+				return fmt.Errorf("content[%d].image_url: %w", i, err)
+			}
+			m.Parts = append(m.Parts, MessageContentPart{
+				Type:        "image_url",
+				ImageURL:    url,
+				ImageDetail: detail,
+			})
+		default:
+			return fmt.Errorf("content[%d].type %q is not supported", i, part.Type)
+		}
+	}
+	m.Content = text.String()
+	return nil
+}
+
+func decodeOpenAIImageURL(raw json.RawMessage) (url string, detail string, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", "", fmt.Errorf("url is required")
+	}
+	if trimmed[0] == '"' {
+		if err := json.Unmarshal(trimmed, &url); err != nil {
+			return "", "", err
+		}
+	} else {
+		var value struct {
+			URL    string `json:"url"`
+			Detail string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return "", "", err
+		}
+		url = value.URL
+		detail = value.Detail
+	}
+	if strings.TrimSpace(url) == "" {
+		return "", "", fmt.Errorf("url is required")
+	}
+	return url, detail, nil
 }
 
 // OllamaChatRequest is the /api/chat request shape. Ollama defaults to
@@ -72,6 +188,7 @@ type ToolFunction struct {
 }
 
 type ToolCall struct {
+	ID       string           `json:"id,omitempty"`
 	Type     string           `json:"type,omitempty"`
 	Function ToolCallFunction `json:"function"`
 }
@@ -80,6 +197,110 @@ type ToolCallFunction struct {
 	Index     int            `json:"index,omitempty"`
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments,omitempty"`
+}
+
+// UnmarshalJSON accepts both Ollama's object-valued arguments and OpenAI's
+// JSON-string-valued arguments. Responses keep the native Ollama object shape;
+// OpenAI response types below serialize arguments as strings explicitly.
+func (f *ToolCallFunction) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Index     int             `json:"index,omitempty"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	f.Index = raw.Index
+	f.Name = raw.Name
+	if len(raw.Arguments) == 0 || string(raw.Arguments) == "null" {
+		f.Arguments = map[string]any{}
+		return nil
+	}
+	argumentJSON := raw.Arguments
+	if len(argumentJSON) > 0 && argumentJSON[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(argumentJSON, &encoded); err != nil {
+			return err
+		}
+		argumentJSON = []byte(encoded)
+	}
+	if len(bytes.TrimSpace(argumentJSON)) == 0 {
+		f.Arguments = map[string]any{}
+		return nil
+	}
+	if err := json.Unmarshal(argumentJSON, &f.Arguments); err != nil {
+		return err
+	}
+	if f.Arguments == nil {
+		f.Arguments = map[string]any{}
+	}
+	return nil
+}
+
+type OpenAIToolCall struct {
+	Index    *int                   `json:"index,omitempty"`
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function OpenAIToolCallFunction `json:"function"`
+}
+
+type OpenAIToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type OpenAIResponseMessage struct {
+	Role             string           `json:"role,omitempty"`
+	Content          *string          `json:"content"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+}
+
+type OpenAIResponseDelta struct {
+	Role             string           `json:"role,omitempty"`
+	Content          *string          `json:"content,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+}
+
+type OpenAIChatCompletionResponse struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Model   string         `json:"model"`
+	Choices []OpenAIChoice `json:"choices"`
+	Usage   *Usage         `json:"usage,omitempty"`
+	Timings *Timings       `json:"timings,omitempty"`
+}
+
+type OpenAIChoice struct {
+	Index        int                    `json:"index"`
+	Message      *OpenAIResponseMessage `json:"message,omitempty"`
+	FinishReason *string                `json:"finish_reason"`
+}
+
+type OpenAIChatCompletionChunk struct {
+	ID      string              `json:"id"`
+	Object  string              `json:"object"`
+	Created int64               `json:"created"`
+	Model   string              `json:"model"`
+	Choices []OpenAIChunkChoice `json:"choices"`
+	Usage   *Usage              `json:"usage,omitempty"`
+	Timings *Timings            `json:"timings,omitempty"`
+}
+
+type OpenAIChunkChoice struct {
+	Index        int                  `json:"index"`
+	Delta        *OpenAIResponseDelta `json:"delta,omitempty"`
+	FinishReason *string              `json:"finish_reason"`
+}
+
+type OpenAIToolChoice struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
 }
 
 type OllamaChatResponse struct {
@@ -131,9 +352,15 @@ type ChunkChoice struct {
 }
 
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type PromptTokensDetails struct {
+	TextTokens   int `json:"text_tokens"`
+	VisionTokens int `json:"vision_tokens"`
 }
 
 // Timings mirrors Ollama's response fields so Ollama-native clients see

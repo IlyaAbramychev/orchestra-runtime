@@ -2,15 +2,16 @@ package engine
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/tools/mtmd
-#cgo CXXFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/common -I${SRCDIR}/../../llama.cpp/tools/mtmd -I${SRCDIR}/../../llama.cpp/vendor
-#cgo LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/common -L${SRCDIR}/../../llama.cpp/build/tools/mtmd -lcommon -lmtmd -lllama -lggml -lstdc++ -lm
-#cgo darwin LDFLAGS: -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
+#cgo CXXFLAGS: -std=c++17 -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/common -I${SRCDIR}/../../llama.cpp/tools/mtmd -I${SRCDIR}/../../llama.cpp/vendor
+#cgo LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/common -L${SRCDIR}/../../llama.cpp/build/tools/mtmd -L${SRCDIR}/../../llama.cpp/build/src -L${SRCDIR}/../../llama.cpp/build/ggml/src -lcommon -lmtmd -lllama -lggml -lggml-base -lggml-cpu -lstdc++ -lm
+#cgo darwin LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/ggml/src/ggml-metal -L${SRCDIR}/../../llama.cpp/build/ggml/src/ggml-blas -lggml-metal -lggml-blas -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 #include "llama_bridge.h"
 #include <stdlib.h>
 #include <stdbool.h>
 */
 import "C"
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unsafe"
@@ -479,7 +480,8 @@ func llamaDecode(ctx *llamaContext, batch *llamaBatch) error {
 // --- Sampler ---
 
 type llamaSampler struct {
-	ptr *C.struct_llama_sampler
+	ptr    *C.struct_llama_sampler
+	common *C.struct_common_sampler
 }
 
 // SamplerOpts bundles all knobs exposed in the public sampling panel. Nil
@@ -500,7 +502,11 @@ type SamplerOpts struct {
 	Seed             uint32
 	NVocab           int32 // required for penalty samplers
 	Vocab            *llamaVocab
+	Model            *llamaModel
 	Grammar          string
+	GrammarLazy      bool
+	GrammarTriggers  []GrammarTrigger
+	GenerationPrompt string
 }
 
 // NewSamplerChain composes the full llama.cpp sampler chain. Order matters:
@@ -508,6 +514,9 @@ type SamplerOpts struct {
 // (top_k/top_p/min_p/typical) → temperature → mirostat (or dist). See
 // llama.cpp/examples/main/main.cpp for reference.
 func NewSamplerChain(o SamplerOpts) (*llamaSampler, error) {
+	if strings.TrimSpace(o.Grammar) != "" && (o.GenerationPrompt != "" || o.GrammarLazy || len(o.GrammarTriggers) > 0) {
+		return newCommonNativeSampler(o)
+	}
 	chainParams := C.llama_sampler_chain_default_params()
 	chain := C.llama_sampler_chain_init(chainParams)
 
@@ -535,10 +544,35 @@ func NewSamplerChain(o SamplerOpts) (*llamaSampler, error) {
 			return nil, fmt.Errorf("grammar-constrained decoding requires a loaded vocab")
 		}
 		cGrammar := C.CString(grammar)
-		cRoot := C.CString("root")
-		grammarSampler := C.llama_sampler_init_grammar(o.Vocab.ptr, cGrammar, cRoot)
+		var grammarSampler *C.struct_llama_sampler
+		if o.GrammarLazy || len(o.GrammarTriggers) > 0 || o.GenerationPrompt != "" {
+			triggerJSON, marshalErr := json.Marshal(o.GrammarTriggers)
+			if marshalErr != nil {
+				C.free(unsafe.Pointer(cGrammar))
+				C.llama_sampler_free(chain)
+				return nil, fmt.Errorf("encode native grammar triggers: %w", marshalErr)
+			}
+			cTriggers := C.CString(string(triggerJSON))
+			cGenerationPrompt := C.CString(o.GenerationPrompt)
+			var cErr *C.char
+			grammarSampler = C.bridge_chat_grammar_sampler_init(
+				o.Vocab.ptr, cGrammar, C.bool(o.GrammarLazy), cTriggers, cGenerationPrompt, &cErr,
+			)
+			C.free(unsafe.Pointer(cTriggers))
+			C.free(unsafe.Pointer(cGenerationPrompt))
+			if cErr != nil {
+				message := C.GoString(cErr)
+				C.bridge_string_free(cErr)
+				C.free(unsafe.Pointer(cGrammar))
+				C.llama_sampler_free(chain)
+				return nil, fmt.Errorf("invalid native chat grammar: %s", message)
+			}
+		} else {
+			cRoot := C.CString("root")
+			grammarSampler = C.llama_sampler_init_grammar(o.Vocab.ptr, cGrammar, cRoot)
+			C.free(unsafe.Pointer(cRoot))
+		}
 		C.free(unsafe.Pointer(cGrammar))
-		C.free(unsafe.Pointer(cRoot))
 		if grammarSampler == nil {
 			C.llama_sampler_free(chain)
 			return nil, fmt.Errorf("invalid grammar for constrained decoding")
@@ -595,6 +629,55 @@ func NewSamplerChain(o SamplerOpts) (*llamaSampler, error) {
 	return &llamaSampler{ptr: chain}, nil
 }
 
+func newCommonNativeSampler(o SamplerOpts) (*llamaSampler, error) {
+	if o.Model == nil || o.Model.ptr == nil {
+		return nil, fmt.Errorf("native chat sampling requires a loaded model")
+	}
+	options, err := json.Marshal(map[string]any{
+		"seed":              o.Seed,
+		"temperature":       o.Temp,
+		"top_k":             o.TopK,
+		"top_p":             o.TopP,
+		"min_p":             o.MinP,
+		"typical_p":         o.TypicalP,
+		"repeat_penalty":    o.RepeatPenalty,
+		"repeat_last_n":     o.RepeatLastN,
+		"frequency_penalty": o.FrequencyPenalty,
+		"presence_penalty":  o.PresencePenalty,
+		"mirostat":          o.Mirostat,
+		"mirostat_tau":      o.MirostatTau,
+		"mirostat_eta":      o.MirostatEta,
+	})
+	if err != nil {
+		return nil, err
+	}
+	triggers, err := json.Marshal(o.GrammarTriggers)
+	if err != nil {
+		return nil, err
+	}
+	cOptions := C.CString(string(options))
+	cGrammar := C.CString(o.Grammar)
+	cTriggers := C.CString(string(triggers))
+	cGenerationPrompt := C.CString(o.GenerationPrompt)
+	defer C.free(unsafe.Pointer(cOptions))
+	defer C.free(unsafe.Pointer(cGrammar))
+	defer C.free(unsafe.Pointer(cTriggers))
+	defer C.free(unsafe.Pointer(cGenerationPrompt))
+	var cErr *C.char
+	common := C.bridge_common_sampler_init(
+		o.Model.ptr, cOptions, cGrammar, C.bool(o.GrammarLazy), cTriggers, cGenerationPrompt, &cErr,
+	)
+	if cErr != nil {
+		message := C.GoString(cErr)
+		C.bridge_string_free(cErr)
+		return nil, fmt.Errorf("initialize native llama.cpp sampler: %s", message)
+	}
+	if common == nil {
+		return nil, fmt.Errorf("initialize native llama.cpp sampler: empty result")
+	}
+	return &llamaSampler{common: common}, nil
+}
+
 // NewGreedySampler creates a greedy (argmax) sampler.
 func NewGreedySampler() *llamaSampler {
 	chainParams := C.llama_sampler_chain_default_params()
@@ -604,14 +687,25 @@ func NewGreedySampler() *llamaSampler {
 }
 
 func (s *llamaSampler) Sample(ctx *llamaContext, idx int) Token {
+	if s.common != nil {
+		return C.bridge_common_sampler_sample(s.common, ctx.ptr, C.int32_t(idx))
+	}
 	return C.llama_sampler_sample(s.ptr, ctx.ptr, C.int32_t(idx))
 }
 
 func (s *llamaSampler) Accept(token Token) {
+	if s.common != nil {
+		C.bridge_common_sampler_accept(s.common, token)
+		return
+	}
 	C.llama_sampler_accept(s.ptr, token)
 }
 
 func (s *llamaSampler) Free() {
+	if s.common != nil {
+		C.bridge_common_sampler_free(s.common)
+		s.common = nil
+	}
 	if s.ptr != nil {
 		C.llama_sampler_free(s.ptr)
 		s.ptr = nil
@@ -621,9 +715,115 @@ func (s *llamaSampler) Free() {
 // --- Chat template ---
 
 type ChatMessage struct {
-	Role    string
-	Content string
-	Images  []string
+	Role       string
+	Content    string
+	Reasoning  string
+	ToolName   string
+	ToolCallID string
+	ToolCalls  []ToolCall
+	Parts      []ContentPart
+	Images     []string
+}
+
+// ToolCall keeps arguments as JSON so the native llama.cpp chat layer sees
+// exactly the structured history supplied by the client.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments json.RawMessage
+}
+
+type ContentPart struct {
+	Type        string
+	Text        string
+	ImageURL    string
+	ImageDetail string
+}
+
+type GrammarTrigger struct {
+	Type  int    `json:"type"`
+	Value string `json:"value"`
+	Token int32  `json:"token"`
+}
+
+type NativeChatRender struct {
+	Prompt           string
+	Grammar          string
+	Parser           string
+	GenerationPrompt string
+	AdditionalStops  []string
+	GrammarTriggers  []GrammarTrigger
+	Capabilities     map[string]bool
+	Format           int
+	GrammarLazy      bool
+	SupportsThinking bool
+}
+
+func RenderNativeChat(model *llamaModel, tmpl, messagesJSON, toolsJSON string, toolChoice int, parallelToolCalls, enableThinking bool) (*NativeChatRender, error) {
+	if model == nil || model.ptr == nil {
+		return nil, fmt.Errorf("native chat rendering requires a loaded model")
+	}
+	cTemplate := C.CString(tmpl)
+	cMessages := C.CString(messagesJSON)
+	cTools := C.CString(toolsJSON)
+	defer C.free(unsafe.Pointer(cTemplate))
+	defer C.free(unsafe.Pointer(cMessages))
+	defer C.free(unsafe.Pointer(cTools))
+
+	result := C.bridge_chat_render_native(
+		model.ptr,
+		cTemplate,
+		cMessages,
+		cTools,
+		C.int32_t(toolChoice),
+		C.bool(parallelToolCalls),
+		C.bool(enableThinking),
+	)
+	defer C.bridge_chat_render_result_free(result)
+	if result.error != nil {
+		return nil, fmt.Errorf("native chat template: %s", C.GoString(result.error))
+	}
+	render := &NativeChatRender{
+		Prompt:           C.GoString(result.prompt),
+		Grammar:          C.GoString(result.grammar),
+		Parser:           C.GoString(result.parser),
+		GenerationPrompt: C.GoString(result.generation_prompt),
+		Format:           int(result.format),
+		GrammarLazy:      bool(result.grammar_lazy),
+		SupportsThinking: bool(result.supports_thinking),
+	}
+	if result.additional_stops_json != nil {
+		_ = json.Unmarshal([]byte(C.GoString(result.additional_stops_json)), &render.AdditionalStops)
+	}
+	if result.grammar_triggers_json != nil {
+		_ = json.Unmarshal([]byte(C.GoString(result.grammar_triggers_json)), &render.GrammarTriggers)
+	}
+	if result.capabilities_json != nil {
+		_ = json.Unmarshal([]byte(C.GoString(result.capabilities_json)), &render.Capabilities)
+	}
+	return render, nil
+}
+
+func ParseNativeChat(response string, render *NativeChatRender) (json.RawMessage, error) {
+	if render == nil {
+		return nil, fmt.Errorf("native chat parser parameters are required")
+	}
+	cResponse := C.CString(response)
+	cParser := C.CString(render.Parser)
+	cGenerationPrompt := C.CString(render.GenerationPrompt)
+	defer C.free(unsafe.Pointer(cResponse))
+	defer C.free(unsafe.Pointer(cParser))
+	defer C.free(unsafe.Pointer(cGenerationPrompt))
+
+	result := C.bridge_chat_parse_native(cResponse, cParser, cGenerationPrompt, C.int32_t(render.Format))
+	defer C.bridge_chat_parse_result_free(result)
+	if result.error != nil {
+		return nil, fmt.Errorf("native chat parse: %s", C.GoString(result.error))
+	}
+	if result.message_json == nil {
+		return nil, fmt.Errorf("native chat parse returned no message")
+	}
+	return json.RawMessage(C.GoString(result.message_json)), nil
 }
 
 func ApplyChatTemplate(tmpl string, messages []ChatMessage, addAssistant bool) (string, error) {

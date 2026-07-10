@@ -104,3 +104,46 @@ func TestWithMediaMarkersInsertsOneMarkerPerImage(t *testing.T) {
 		t.Fatalf("original messages mutated: %+v", messages[0])
 	}
 }
+
+func TestWithMediaMarkersPreservesInterleavedContentPartOrder(t *testing.T) {
+	messages := []ChatMessage{{
+		Role: "user",
+		Parts: []ContentPart{
+			{Type: "text", Text: "before"},
+			{Type: "image_url", ImageURL: "data:image/png;base64,aGVsbG8="},
+			{Type: "text", Text: "after"},
+		},
+	}}
+
+	out := withMediaMarkers(messages)
+	want := "before\n" + mtmdDefaultMarker() + "\nafter"
+	if out[0].Content != want {
+		t.Fatalf("content = %q, want %q", out[0].Content, want)
+	}
+	if len(out[0].Parts) != 0 {
+		t.Fatalf("expected content parts stripped after marker insertion: %+v", out[0].Parts)
+	}
+	images, err := decodeMessageImages(messages)
+	if err != nil {
+		t.Fatalf("decodeMessageImages: %v", err)
+	}
+	if len(images) != 1 || string(images[0]) != "hello" {
+		t.Fatalf("decoded images = %+v", images)
+	}
+}
+
+func TestNativeChatParserSeparatesReasoningFromContent(t *testing.T) {
+	content, reasoning := splitReasoningContent("<think>inspect workspace</think>\nNo changes needed.")
+	if reasoning != "inspect workspace" || content != "No changes needed." {
+		t.Fatalf("reasoning/content not separated: content=%q reasoning=%q", content, reasoning)
+	}
+}
+
+func TestLooksLikeToolProtocolDetectsDamagedEnvelope(t *testing.T) {
+	if !looksLikeToolProtocol(`{"tool_calls":[{"function":{"name":"read_file"}}]}, {"path":"README.md"}]`) {
+		t.Fatal("damaged tool envelope was not detected")
+	}
+	if looksLikeToolProtocol("A normal answer about functions.") {
+		t.Fatal("plain content was misclassified as a tool protocol")
+	}
+}

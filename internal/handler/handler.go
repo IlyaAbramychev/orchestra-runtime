@@ -76,8 +76,10 @@ func runtimeHTTPStatus(err error) int {
 	switch {
 	case strings.Contains(msg, "queue full"):
 		return http.StatusTooManyRequests
+	case strings.Contains(msg, "load would exceed ram safety budget"):
+		return http.StatusUnprocessableEntity
 	case strings.Contains(msg, "no model loaded"),
-		strings.Contains(msg, "model not found"):
+		isModelNotFoundMessage(msg):
 		return http.StatusNotFound
 	case strings.Contains(msg, "prompt too long"),
 		strings.Contains(msg, "input too long"),
@@ -103,8 +105,35 @@ func runtimeErrorCode(err error) string {
 	if errors.As(err, &contextLength) {
 		return contextLength.Code()
 	}
+	if errors.Is(err, context.Canceled) {
+		return "request_cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request_timeout"
+	}
+	if errors.Is(err, rpc.ErrWorkerCrashed) {
+		return "worker_crashed"
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(msg, "queue full"):
+		return "queue_full"
+	case strings.Contains(msg, "load would exceed ram safety budget"):
+		return "memory_budget_exceeded"
+	case strings.Contains(msg, "no model loaded"), isModelNotFoundMessage(msg):
+		return "model_not_found"
+	case strings.Contains(msg, "engine not ready"), strings.Contains(msg, "worker not ready"):
+		return "runtime_not_ready"
+	case strings.Contains(msg, "remote image urls are not supported"):
+		return "remote_image_url_unsupported"
+	case strings.Contains(msg, "unsupported image format"):
+		return "unsupported_image_format"
+	case strings.Contains(msg, "image count") && strings.Contains(msg, "exceeds limit"):
+		return "image_count_exceeded"
+	case strings.Contains(msg, "total decoded image size") && strings.Contains(msg, "exceeds limit"):
+		return "image_payload_too_large"
+	case strings.Contains(msg, "decoded image size") && strings.Contains(msg, "exceeds limit"):
+		return "image_too_large"
 	case strings.Contains(msg, "prompt too long"),
 		strings.Contains(msg, "input too long"),
 		strings.Contains(msg, "context window"),
@@ -112,6 +141,11 @@ func runtimeErrorCode(err error) string {
 		return engine.ContextLengthExceededCode
 	case strings.Contains(msg, "invalid base64 image"),
 		strings.Contains(msg, "empty image payload"),
+		strings.Contains(msg, "invalid image data uri"),
+		strings.Contains(msg, "image data uri must use base64"),
+		strings.Contains(msg, "image_url must be a base64 data uri"),
+		strings.Contains(msg, "image_url.detail must be"),
+		strings.Contains(msg, "cannot combine content image parts with images"),
 		strings.Contains(msg, "decode image "),
 		strings.Contains(msg, "failed to decode image input"):
 		return "invalid_image_input"
@@ -126,6 +160,12 @@ func runtimeErrorCode(err error) string {
 	default:
 		return ""
 	}
+}
+
+func isModelNotFoundMessage(msg string) bool {
+	msg = strings.TrimSpace(strings.ToLower(msg))
+	return strings.Contains(msg, "model not found") ||
+		(strings.HasPrefix(msg, "model ") && strings.HasSuffix(msg, " not found"))
 }
 
 func readJSON(r *http.Request, v interface{}) error {
@@ -285,6 +325,9 @@ func collectCompletionStream(ch <-chan engine.CompletionChunk) (string, engine.C
 		}
 		if chunk.Done {
 			final = chunk
+			if chunk.Text != "" {
+				text.WriteString(chunk.Text)
+			}
 			return text.String(), final, nil
 		}
 		text.WriteString(chunk.Text)

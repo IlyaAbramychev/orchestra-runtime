@@ -57,6 +57,7 @@ jobs:
           mkdir -p release-assets
           gh release download "${{ inputs.release_tag }}" \
             --pattern 'orchestra-runtime-*' \
+            --pattern 'orchestra-worker-*' \
             --dir release-assets
           ls -la release-assets
 

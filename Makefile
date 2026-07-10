@@ -7,6 +7,7 @@ VERSION ?= dev-$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 LLAMA_CPP_COMMIT ?= $(shell git -C $(LLAMA_DIR) rev-parse HEAD 2>/dev/null || echo unknown)
 BUILD_DIR = bin
+INSTALL_DIR ?= $(HOME)/.orchestra/bin
 LLAMA_DIR = llama.cpp
 LLAMA_BUILD_DIR = build/llama
 
@@ -20,8 +21,20 @@ all: build-metal
 # helpers (llama_model_load_from_url) which we don't use — we do all HTTP from
 # Go. Disabling avoids the libcurl4-openssl-dev dep on Linux.
 
+.PHONY: llama-prepare
+llama-prepare:
+	@if [ -f "$(LLAMA_DIR)/build/CMakeCache.txt" ]; then \
+		cache_home=$$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$(LLAMA_DIR)/build/CMakeCache.txt"); \
+		current_home=$$(cd "$(LLAMA_DIR)" && pwd -P); \
+		if [ -n "$$cache_home" ] && [ "$$cache_home" != "$$current_home" ]; then \
+			echo "Resetting relocated llama.cpp CMake cache ($$cache_home -> $$current_home)..."; \
+			rm -f "$(LLAMA_DIR)/build/CMakeCache.txt"; \
+			rm -rf "$(LLAMA_DIR)/build/CMakeFiles"; \
+		fi; \
+	fi
+
 .PHONY: llama-metal
-llama-metal:
+llama-metal: llama-prepare
 	@echo "Building llama.cpp with Metal backend..."
 	cd $(LLAMA_DIR) && cmake -B build \
 		-DGGML_METAL=ON \
@@ -37,7 +50,7 @@ llama-metal:
 	@echo "llama.cpp built successfully (Metal)"
 
 .PHONY: llama-cuda
-llama-cuda:
+llama-cuda: llama-prepare
 	@echo "Building llama.cpp with CUDA backend..."
 	cd $(LLAMA_DIR) && cmake -B build \
 		-DGGML_CUDA=ON \
@@ -52,7 +65,7 @@ llama-cuda:
 	@echo "llama.cpp built successfully (CUDA)"
 
 .PHONY: llama-cpu
-llama-cpu:
+llama-cpu: llama-prepare
 	@echo "Building llama.cpp with CPU backend..."
 	cd $(LLAMA_DIR) && cmake -B build \
 		-DBUILD_SHARED_LIBS=OFF \
@@ -141,6 +154,16 @@ test:
 lint:
 	go vet ./...
 
+.PHONY: install
+install:
+	@test -x "$(BUILD_DIR)/$(BINARY)" || (echo "Missing $(BUILD_DIR)/$(BINARY); run make build-metal, build-cuda, or build-cpu first" && exit 1)
+	@test -x "$(BUILD_DIR)/$(WORKER_BINARY)" || (echo "Missing $(BUILD_DIR)/$(WORKER_BINARY); build both runtime binaries first" && exit 1)
+	mkdir -p "$(INSTALL_DIR)"
+	cp "$(BUILD_DIR)/$(BINARY)" "$(INSTALL_DIR)/$(BINARY)"
+	cp "$(BUILD_DIR)/$(WORKER_BINARY)" "$(INSTALL_DIR)/$(WORKER_BINARY)"
+	chmod 755 "$(INSTALL_DIR)/$(BINARY)" "$(INSTALL_DIR)/$(WORKER_BINARY)"
+	@echo "Installed: $(INSTALL_DIR)/$(BINARY) + $(INSTALL_DIR)/$(WORKER_BINARY)"
+
 # --- Submodule ---
 
 .PHONY: submodule-init
@@ -166,6 +189,7 @@ help:
 	@echo "  make build-cuda    Build with CUDA backend (NVIDIA GPU)"
 	@echo "  make build-cpu     Build with CPU-only backend"
 	@echo "  make run           Run in development mode"
+	@echo "  make install       Install both built binaries to ~/.orchestra/bin"
 	@echo "  make test          Run tests"
 	@echo "  make clean         Clean build artifacts"
 	@echo "  make submodule-init  Initialize llama.cpp submodule"

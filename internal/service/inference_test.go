@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -11,11 +12,13 @@ import (
 )
 
 type fakeBackend struct {
-	block     chan struct{}
-	started   chan struct{}
-	loadBlock chan struct{}
-	loadStart chan struct{}
-	unloaded  chan struct{}
+	block              chan struct{}
+	started            chan struct{}
+	loadBlock          chan struct{}
+	loadStart          chan struct{}
+	unloaded           chan struct{}
+	loadedID           string
+	completedWithModel string
 }
 
 func (f *fakeBackend) InitBackend() {}
@@ -38,20 +41,98 @@ func (f *fakeBackend) UnloadModel() {
 		close(f.unloaded)
 	}
 }
-func (f *fakeBackend) IsLoaded() bool        { return true }
-func (f *fakeBackend) LoadedModelID() string { return "test" }
-func (f *fakeBackend) State() string         { return engine.StateReady }
-func (f *fakeBackend) ModelDesc() string     { return "" }
+func (f *fakeBackend) IsLoaded() bool { return true }
+func (f *fakeBackend) LoadedModelID() string {
+	if f.loadedID != "" {
+		return f.loadedID
+	}
+	return "test"
+}
+func (f *fakeBackend) State() string     { return engine.StateReady }
+func (f *fakeBackend) ModelDesc() string { return "" }
 func (f *fakeBackend) Complete(ctx context.Context, _ []engine.ChatMessage, _ engine.CompletionParams) (*engine.CompletionResult, error) {
+	f.completedWithModel = f.LoadedModelID()
 	select {
 	case f.started <- struct{}{}:
 	default:
+	}
+	if f.block == nil {
+		return &engine.CompletionResult{FinishReason: "stop"}, nil
 	}
 	select {
 	case <-f.block:
 		return &engine.CompletionResult{FinishReason: "stop"}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+type switchingModelLoader struct {
+	backend  *fakeBackend
+	attempts int
+}
+
+func (l *switchingModelLoader) EnsureLoaded(context.Context, string) error { return nil }
+
+func (l *switchingModelLoader) EnsureLoadedFor(_ context.Context, model, _ string) error {
+	l.attempts++
+	l.backend.loadedID = model
+	if l.attempts == 1 {
+		// Simulate another queued request switching models after auto-load but
+		// before this request acquires the inference slot.
+		l.backend.loadedID = "other-model"
+	}
+	return nil
+}
+
+func (l *switchingModelLoader) ResolveModelID(model string) (string, error) {
+	return model, nil
+}
+
+func (l *switchingModelLoader) DefaultsForModel(string) (ModelRequestDefaults, error) {
+	return ModelRequestDefaults{}, nil
+}
+
+func TestInferenceNeverRunsAgainstModelSwitchedAfterAutoLoad(t *testing.T) {
+	backend := &fakeBackend{}
+	svc := NewInferenceService(backend, 2)
+	loader := &switchingModelLoader{backend: backend}
+	svc.SetModelLoader(loader)
+
+	_, err := svc.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model:    "requested-model",
+		Messages: []model.ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if backend.completedWithModel != "requested-model" {
+		t.Fatalf("inference used %q, want requested-model", backend.completedWithModel)
+	}
+	if loader.attempts != 2 {
+		t.Fatalf("expected model verification to trigger one reload, got %d attempts", loader.attempts)
+	}
+}
+
+func TestToEngineMessagesPreservesOpenAIToolHistory(t *testing.T) {
+	var request model.ChatCompletionRequest
+	err := json.Unmarshal([]byte(`{
+		"model":"test",
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"file contents"}
+		]
+	}`), &request)
+	if err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+
+	got := toEngineMessages(request.Messages)
+	if len(got) != 2 || len(got[0].ToolCalls) != 1 || got[0].ToolCalls[0].Name != "read_file" {
+		t.Fatalf("assistant tool call was lost: %+v", got)
+	}
+	if got[1].ToolCallID != "call_1" || got[1].Content != "file contents" {
+		t.Fatalf("tool result identity was lost: %+v", got[1])
 	}
 }
 func (f *fakeBackend) CompleteStream(context.Context, []engine.ChatMessage, engine.CompletionParams) (<-chan engine.CompletionChunk, error) {

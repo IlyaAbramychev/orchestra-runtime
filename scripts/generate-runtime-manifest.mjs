@@ -29,9 +29,13 @@ function parseArtifactName(fileName) {
   // orchestra-runtime-darwin-arm64
   // orchestra-runtime-win32-x64.exe
   const noExt = fileName.replace(/\.exe$/i, '');
-  const m = noExt.match(/^orchestra-runtime-(darwin|linux|win32)-(arm64|x64)$/i);
+  const m = noExt.match(/^orchestra-(runtime|worker)-(darwin|linux|win32)-(arm64|x64)$/i);
   if (!m) return null;
-  return { platform: m[1].toLowerCase(), arch: m[2].toLowerCase() };
+  return {
+    kind: m[1].toLowerCase(),
+    platform: m[2].toLowerCase(),
+    arch: m[3].toLowerCase(),
+  };
 }
 
 async function sha256File(filePath) {
@@ -62,21 +66,31 @@ async function main() {
 
   const entries = await fs.readdir(artifactsDir, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
-  const artifacts = [];
+  const artifactsByTarget = new Map();
 
   for (const fileName of files) {
     const parsed = parseArtifactName(fileName);
     if (!parsed) continue;
     const abs = path.join(artifactsDir, fileName);
     const stat = await fs.stat(abs);
-    artifacts.push({
+    const target = `${parsed.platform}/${parsed.arch}`;
+    const artifact = artifactsByTarget.get(target) ?? {
       platform: parsed.platform,
       arch: parsed.arch,
-      url: `${baseUrl}/${runtimeVersion}/${fileName}`,
-      sha256: await sha256File(abs),
-      size: stat.size,
-    });
+    };
+    if (parsed.kind === 'runtime') {
+      artifact.url = `${baseUrl}/${runtimeVersion}/${fileName}`;
+      artifact.sha256 = await sha256File(abs);
+      artifact.size = stat.size;
+    } else {
+      artifact.workerUrl = `${baseUrl}/${runtimeVersion}/${fileName}`;
+      artifact.workerSha256 = await sha256File(abs);
+      artifact.workerSize = stat.size;
+    }
+    artifactsByTarget.set(target, artifact);
   }
+
+  const artifacts = [...artifactsByTarget.values()].filter((artifact) => artifact.url);
 
   if (artifacts.length === 0) {
     throw new Error(

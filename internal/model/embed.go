@@ -28,20 +28,22 @@ type OpenAIEmbeddingsRequest struct {
 	Model          string          `json:"model"`
 	Input          json.RawMessage `json:"input"`
 	EncodingFormat string          `json:"encoding_format,omitempty"` // "float" (default) or "base64"
-	Dimensions     *int            `json:"dimensions,omitempty"`      // not supported; present for compat
+	Dimensions     *int            `json:"dimensions,omitempty"`      // optional output dimension cap; only truncation is supported
 }
 
 type OpenAIEmbeddingsResponse struct {
-	Object string                   `json:"object"` // "list"
-	Data   []OpenAIEmbeddingRecord  `json:"data"`
-	Model  string                   `json:"model"`
-	Usage  OpenAIEmbeddingsUsage    `json:"usage"`
+	Object string                  `json:"object"` // "list"
+	Data   []OpenAIEmbeddingRecord `json:"data"`
+	Model  string                  `json:"model"`
+	Usage  OpenAIEmbeddingsUsage   `json:"usage"`
 }
 
 type OpenAIEmbeddingRecord struct {
-	Object    string    `json:"object"` // "embedding"
-	Index     int       `json:"index"`
-	Embedding []float32 `json:"embedding"`
+	Object string `json:"object"` // "embedding"
+	Index  int    `json:"index"`
+	// Embedding is either []float32 (default) or a base64 string when
+	// encoding_format="base64" is requested.
+	Embedding any `json:"embedding"`
 }
 
 type OpenAIEmbeddingsUsage struct {

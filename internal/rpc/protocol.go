@@ -25,6 +25,11 @@ import (
 // ── Method names (kept stable across versions) ───────────────────────────────
 
 const (
+	// ProtocolVersion is bumped whenever host/worker payload semantics change.
+	// Host and worker must match exactly: silently mixing release binaries can
+	// corrupt inference requests even when the NDJSON framing still decodes.
+	ProtocolVersion = 2
+
 	MethodPing           = "ping"
 	MethodStatus         = "status"
 	MethodLoadModel      = "load_model"
@@ -37,6 +42,14 @@ const (
 	MethodCancel         = "cancel"   // cancels another request by id
 	MethodShutdown       = "shutdown" // graceful worker exit
 )
+
+type PingResult struct {
+	Pong            bool   `json:"pong"`
+	ProtocolVersion int    `json:"protocol_version"`
+	Version         string `json:"version"`
+	BuildCommit     string `json:"build_commit"`
+	LlamaCppCommit  string `json:"llama_cpp_commit"`
+}
 
 // ── Error codes ──────────────────────────────────────────────────────────────
 
@@ -231,29 +244,54 @@ type StatusResult struct {
 // ChatMessage mirrors engine.ChatMessage but lives here so the rpc package
 // doesn't import engine (which pulls in CGo on the host side).
 type ChatMessage struct {
-	Role    string   `json:"role"`
-	Content string   `json:"content"`
-	Images  []string `json:"images,omitempty"`
+	Role       string        `json:"role"`
+	Content    string        `json:"content"`
+	Reasoning  string        `json:"reasoning,omitempty"`
+	ToolName   string        `json:"tool_name,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+	Parts      []ContentPart `json:"parts,omitempty"`
+	Images     []string      `json:"images,omitempty"`
+}
+
+type ToolCall struct {
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type ContentPart struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	ImageURL    string `json:"image_url,omitempty"`
+	ImageDetail string `json:"image_detail,omitempty"`
 }
 
 type CompletionParams struct {
-	MaxTokens        int      `json:"max_tokens"`
-	Temperature      float32  `json:"temperature"`
-	TopK             int      `json:"top_k"`
-	TopP             float32  `json:"top_p"`
-	MinP             float32  `json:"min_p"`
-	TypicalP         float32  `json:"typical_p"`
-	RepeatPenalty    float32  `json:"repeat_penalty"`
-	RepeatLastN      int      `json:"repeat_last_n"`
-	FrequencyPenalty float32  `json:"frequency_penalty"`
-	PresencePenalty  float32  `json:"presence_penalty"`
-	Seed             int64    `json:"seed"`
-	Mirostat         int      `json:"mirostat"`
-	MirostatTau      float32  `json:"mirostat_tau"`
-	MirostatEta      float32  `json:"mirostat_eta"`
-	Stop             []string `json:"stop,omitempty"`
-	RawPrompt        bool     `json:"raw_prompt,omitempty"`
-	Grammar          string   `json:"grammar,omitempty"`
+	MaxTokens         int      `json:"max_tokens"`
+	Temperature       float32  `json:"temperature"`
+	TopK              int      `json:"top_k"`
+	TopP              float32  `json:"top_p"`
+	MinP              float32  `json:"min_p"`
+	TypicalP          float32  `json:"typical_p"`
+	RepeatPenalty     float32  `json:"repeat_penalty"`
+	RepeatLastN       int      `json:"repeat_last_n"`
+	FrequencyPenalty  float32  `json:"frequency_penalty"`
+	PresencePenalty   float32  `json:"presence_penalty"`
+	Seed              int64    `json:"seed"`
+	Mirostat          int      `json:"mirostat"`
+	MirostatTau       float32  `json:"mirostat_tau"`
+	MirostatEta       float32  `json:"mirostat_eta"`
+	Stop              []string `json:"stop,omitempty"`
+	ChatTemplate      string   `json:"chat_template,omitempty"`
+	RawPrompt         bool     `json:"raw_prompt,omitempty"`
+	Grammar           string   `json:"grammar,omitempty"`
+	NativeChat        bool     `json:"native_chat,omitempty"`
+	ToolsJSON         string   `json:"tools_json,omitempty"`
+	ToolChoice        int      `json:"tool_choice,omitempty"`
+	ParallelToolCalls bool     `json:"parallel_tool_calls,omitempty"`
+	ThinkingSet       bool     `json:"thinking_set,omitempty"`
+	EnableThinking    bool     `json:"enable_thinking,omitempty"`
 }
 
 type CompleteParams struct {
@@ -268,21 +306,29 @@ type Timings struct {
 }
 
 type CompleteResult struct {
-	Text             string  `json:"text"`
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	FinishReason     string  `json:"finish_reason"`
-	Timings          Timings `json:"timings"`
+	Text             string     `json:"text"`
+	Reasoning        string     `json:"reasoning,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	PromptTokens     int        `json:"prompt_tokens"`
+	TextPromptTokens int        `json:"text_prompt_tokens,omitempty"`
+	VisionTokens     int        `json:"vision_tokens,omitempty"`
+	CompletionTokens int        `json:"completion_tokens"`
+	FinishReason     string     `json:"finish_reason"`
+	Timings          Timings    `json:"timings"`
 }
 
 type StreamChunk struct {
-	Text             string  `json:"text,omitempty"`
-	Done             bool    `json:"done,omitempty"`
-	FinishReason     string  `json:"finish_reason,omitempty"`
-	PromptTokens     int     `json:"prompt_tokens,omitempty"`
-	CompletionTokens int     `json:"completion_tokens,omitempty"`
-	Timings          Timings `json:"timings,omitempty"`
-	Err              string  `json:"err,omitempty"` // non-fatal: propagated to caller
+	Text             string     `json:"text,omitempty"`
+	Reasoning        string     `json:"reasoning,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	Done             bool       `json:"done,omitempty"`
+	FinishReason     string     `json:"finish_reason,omitempty"`
+	PromptTokens     int        `json:"prompt_tokens,omitempty"`
+	TextPromptTokens int        `json:"text_prompt_tokens,omitempty"`
+	VisionTokens     int        `json:"vision_tokens,omitempty"`
+	CompletionTokens int        `json:"completion_tokens,omitempty"`
+	Timings          Timings    `json:"timings,omitempty"`
+	Err              string     `json:"err,omitempty"` // non-fatal: propagated to caller
 }
 
 type EmbedParams struct {

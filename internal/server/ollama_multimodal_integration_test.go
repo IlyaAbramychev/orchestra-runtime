@@ -74,6 +74,28 @@ func TestOllamaMultimodalRealVisionIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("openai chat content parts", func(t *testing.T) {
+		var resp model.ChatCompletionResponse
+		visionJSON(
+			t,
+			server.URL,
+			http.MethodPost,
+			"/v1/chat/completions",
+			`{"model":"vision-smoke:latest","stream":false,"max_tokens":32,"messages":[{"role":"user","content":[{"type":"text","text":"describe the image briefly"},{"type":"image_url","image_url":{"url":"`+tinyPNGDataURI+`","detail":"high"}}]}]}`,
+			http.StatusOK,
+			&resp,
+		)
+		if len(resp.Choices) != 1 || resp.Choices[0].Message == nil {
+			t.Fatalf("expected OpenAI response choice, got %+v", resp)
+		}
+		if resp.Usage == nil || resp.Usage.PromptTokens <= 0 {
+			t.Fatalf("expected OpenAI prompt usage, got %+v", resp)
+		}
+		if resp.Usage.PromptTokensDetails == nil || resp.Usage.PromptTokensDetails.VisionTokens <= 0 {
+			t.Fatalf("expected OpenAI vision token details, got %+v", resp.Usage)
+		}
+	})
+
 	t.Run("generate", func(t *testing.T) {
 		var resp model.GenerateResponse
 		visionJSON(

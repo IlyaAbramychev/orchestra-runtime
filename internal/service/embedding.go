@@ -27,16 +27,6 @@ func (s *EmbeddingService) SetModelLoader(loader ModelLoader) {
 	s.loader = loader
 }
 
-func (s *EmbeddingService) ensureLoaded(ctx context.Context, model string) error {
-	if s.loader != nil && model != "" {
-		return s.loader.EnsureLoadedFor(ctx, model, "embeddings")
-	}
-	if !s.engine.IsLoaded() {
-		return fmt.Errorf("no model loaded")
-	}
-	return nil
-}
-
 // Embed computes vectors for one or more inputs using the currently loaded
 // model. Loops in Go — llama.cpp can batch multi-sequence but it complicates
 // pooling; batching is a follow-up optimisation.
@@ -55,9 +45,6 @@ func (s *EmbeddingService) EmbedForModel(
 	inputs []string,
 	normalize bool,
 ) ([]*engine.EmbeddingResult, error) {
-	if err := s.ensureLoaded(ctx, model); err != nil {
-		return nil, err
-	}
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("inputs is required")
 	}
@@ -65,7 +52,7 @@ func (s *EmbeddingService) EmbedForModel(
 	// Take the shared inference slot once for the whole batch so nobody else
 	// jumps the queue mid-embedding. Ensures KV clear + decode per input are
 	// atomic.
-	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, "embeddings")
 	if err != nil {
 		return nil, err
 	}

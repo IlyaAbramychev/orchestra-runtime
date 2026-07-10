@@ -515,7 +515,9 @@ func (h *ModelsHandler) Load(w http.ResponseWriter, r *http.Request) {
 	var req model.LoadModelRequest
 	readJSON(r, &req) // optional body
 
-	opts := h.manager.DefaultLoadOptions()
+	// One-click loads receive the model profile; explicit request fields below
+	// remain authoritative for advanced users and automation.
+	opts := h.manager.DefaultLoadOptionsForModel(id)
 
 	if req.GPULayers != nil {
 		opts.GPULayers = *req.GPULayers

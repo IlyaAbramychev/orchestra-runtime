@@ -51,6 +51,10 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   `message.tool_calls`. Tool execution remains the client's responsibility;
   streaming tool calls are supported as buffered NDJSON responses, not
   token-level deltas.
+- `/v1/chat/completions` accepts OpenAI-compatible `tools`, `tool_choice`, and
+  `parallel_tool_calls=false`. It returns string-valued function arguments and
+  preserves assistant tool-call/tool-result history. Streaming tool calls use
+  buffered SSE and are emitted after generation completes.
 - `/api/chat` message `images` and `/api/generate` `images` support
   multimodal prompts when the runtime has either a global
   `ORCHESTRA_MMPROJ_PATH=/path/to/mmproj.gguf` or a model-scoped
@@ -60,6 +64,11 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   fail fast with a clear configuration error instead of being silently ignored.
   If multiple sibling `mmproj` files are present and none is configured
   explicitly, load is rejected with an ambiguity error instead of guessing.
+- `/v1/chat/completions` accepts OpenAI multimodal content arrays with
+  interleaved `text` and `image_url` parts. `image_url.url` currently requires
+  a base64 `data:` URI using PNG, JPEG, or WebP; remote URLs are rejected.
+  Requests are limited to 16 images, 20 MiB decoded per image, and 50 MiB
+  decoded across the request.
 - `/api/chat` and `/api/generate` validate Ollama's `think` option and separate
   `<think>...</think>` model output into `message.thinking` or `thinking` for
   non-streaming responses and buffered NDJSON streams.
@@ -68,6 +77,9 @@ Extended Orchestra endpoints remain available under `/api/models`, `/api/system`
   before emitting stream chunks.
 - `/api/capabilities` exposes machine-readable feature detection for supported,
   partial, extension, and unsupported compatibility behavior.
+- `/api/embeddings` supports `encoding_format` values `float` and `base64`,
+  `dimensions` truncation, and stable `error.code` values for common request
+  and model capability failures.
 - Core Ollama response shapes are covered by golden JSON tests for chat,
   generate, tags, show, ps, pull, delete, and version.
 - A router-level Ollama compatibility smoke suite covers version, capabilities,

@@ -102,6 +102,22 @@ func (m *ModelManager) DefaultLoadOptions() engine.LoadOptions {
 	return m.defaultLoadOptions
 }
 
+// DefaultLoadOptionsForModel returns the zero-configuration profile used by
+// the UI's one-click load and by request-scoped auto-load. A runtime-wide
+// context setting is respected once the user has changed it; otherwise a
+// model's recommended context provides a better out-of-the-box default.
+func (m *ModelManager) DefaultLoadOptionsForModel(id string) engine.LoadOptions {
+	opts := m.DefaultLoadOptions()
+	entry := m.registry.Get(id)
+	if entry == nil || entry.RecommendedSettings.ContextSize <= 0 {
+		return opts
+	}
+	if opts.CtxSize == engine.DefaultLoadOptions().CtxSize {
+		opts.CtxSize = entry.RecommendedSettings.ContextSize
+	}
+	return opts
+}
+
 // List returns all models in the registry.
 func (m *ModelManager) List() []*storage.ModelEntry {
 	entries := m.registry.List()
@@ -193,6 +209,17 @@ func (m *ModelManager) ResolveModel(ref string) (*storage.ModelEntry, error) {
 		}
 	}
 	return nil, fmt.Errorf("model %s not found", ref)
+}
+
+// ResolveModelID returns the stable registry ID for a request-facing model
+// reference. Inference uses it to verify that concurrent auto-loads did not
+// switch the backend to a different model before the runtime slot was acquired.
+func (m *ModelManager) ResolveModelID(ref string) (string, error) {
+	entry, err := m.ResolveModel(ref)
+	if err != nil {
+		return "", err
+	}
+	return entry.ID, nil
 }
 
 // CopyModel creates a new registry entry that points at the same model artifact
@@ -319,7 +346,7 @@ func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability stri
 	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
 		return nil
 	}
-	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptions())
+	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptionsForModel(entry.ID))
 }
 
 func (m *ModelManager) DefaultsForModel(ref string) (ModelRequestDefaults, error) {
@@ -871,6 +898,10 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 	if err != nil {
 		return err
 	}
+	projectorBytes, err := mmprojSize(opts.MMProjPath)
+	if err != nil {
+		return err
+	}
 
 	// Stat the file for its on-disk size; gguf mmap occupies roughly that
 	// many bytes of RAM at inference time.
@@ -878,10 +909,9 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 		if st, err := os.Stat(entry.FilePath); err == nil {
 			modelBytes := st.Size()
 
-			// Per-token KV estimate (fp16). Values match the webview
-			// heuristic in ModelLoadModal.tsx — both estimate from file size.
-			// Calibrated against LM Studio: Qwen3.5 9B at 262144 tokens ≈ 16 GB,
-			// which pins the 7-9B tier at 64 KB/token.
+			// Per-token KV estimate (fp16). The size tier is a conservative
+			// fallback; architecture-specific corrections account for hybrid
+			// models that do not allocate KV on every layer.
 			//
 			//   ≤ 8 GB  → 64 KB/tok  (Qwen3 7-9B / Llama 3 8B avg)
 			//   ≤ 20 GB → 128 KB/tok (14B class)
@@ -891,7 +921,7 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 			// Quantisation scales linearly. Base kvPerTok assumes BOTH K and V in fp16.
 			// If only one side is quantised we scale proportionally:
 			//   factor = (factor(K) + factor(V)) / 2
-			kvPerTok := kvBytesPerTokenForModel(modelBytes)
+			kvPerTok := kvBytesPerTokenForModel(modelBytes, modelFamily(entry))
 			kFactor := kvQuantFactor(opts.TypeK)
 			vFactor := kvQuantFactor(opts.TypeV)
 			kvPerTok = int(float64(kvPerTok) * ((kFactor + vFactor) / 2.0))
@@ -909,14 +939,19 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 			if totalBudget <= 0 {
 				totalBudget = availBudget
 			}
-			needed := modelBytes + kvBytes
+			needed := modelBytes + projectorBytes + kvBytes
 			if totalBudget > 0 && needed > totalBudget {
+				projectorEstimate := ""
+				if projectorBytes > 0 {
+					projectorEstimate = fmt.Sprintf(" + mmproj %.1f GB", float64(projectorBytes)/1024/1024/1024)
+				}
 				return fmt.Errorf(
-					"load would exceed RAM safety budget: model %.1f GB + KV ~%.1f GB = %.1f GB, "+
+					"load would exceed RAM safety budget: model %.1f GB%s + KV ~%.1f GB = %.1f GB, "+
 						"available %.1f GB, total %.1f GB (reserved 2 GB for OS). "+
 						"Close other apps, lower n_ctx, enable KV quantisation, "+
 						"or set ORCHESTRA_ALLOW_MEMORY_OVERCOMMIT=1 to bypass.",
 					float64(modelBytes)/1024/1024/1024,
+					projectorEstimate,
 					float64(kvBytes)/1024/1024/1024,
 					float64(needed)/1024/1024/1024,
 					float64(avail)/1024/1024/1024,
@@ -942,6 +977,31 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 		return err
 	}
 	return m.engine.LoadModel(id, entry.FilePath, opts)
+}
+
+func mmprojSize(path string) (int64, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return 0, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("configured mmproj %q was not found: %w", path, err)
+	}
+	if info.IsDir() {
+		return 0, fmt.Errorf("configured mmproj %q is a directory", path)
+	}
+	if !strings.HasSuffix(strings.ToLower(info.Name()), ".gguf") {
+		return 0, fmt.Errorf("configured mmproj %q is not a GGUF file", path)
+	}
+	return info.Size(), nil
+}
+
+func modelFamily(entry *storage.ModelEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return firstNonEmpty(entry.Family, entry.Name, entry.Filename)
 }
 
 // UnloadModel unloads the current model.
@@ -1156,21 +1216,39 @@ func extractFilename(url string) string {
 	return name
 }
 
-// kvBytesPerTokenForModel picks a tier default for KV-cache-per-token (fp16)
-// based on model file size. See the block comment in LoadModel's guard for
-// calibration notes. Keep in sync with webview's kvBytesPerToken().
-func kvBytesPerTokenForModel(modelBytes int64) int {
+// kvBytesPerTokenForModel estimates KV-cache bytes per token in fp16.
+//
+// File-size tiers are only a fallback: quantization changes file size without
+// changing KV dimensions, and hybrid architectures may allocate KV on only a
+// subset of layers. Qwen3.5 uses full attention every fourth layer; measured
+// llama.cpp allocations are 32 KiB/token for 9B and 64 KiB/token for 27B,
+// exactly half of their respective fallback tiers.
+func kvBytesPerTokenForModel(modelBytes int64, family string) int {
 	const GB = int64(1024) * 1024 * 1024
+	var estimate int
 	switch {
 	case modelBytes < 8*GB:
-		return 64 * 1024 // 7-9B class
+		estimate = 64 * 1024 // 7-9B class
 	case modelBytes < 20*GB:
-		return 128 * 1024 // 14B class
+		estimate = 128 * 1024 // 14-27B quantized class
 	case modelBytes < 45*GB:
-		return 256 * 1024 // 32B class
+		estimate = 256 * 1024 // 32B class
 	default:
-		return 384 * 1024 // 70B+
+		estimate = 384 * 1024 // 70B+
 	}
+
+	if strings.Contains(normalizeModelFamily(family), "qwen35") {
+		estimate /= 2
+	}
+	return estimate
+}
+
+func normalizeModelFamily(family string) string {
+	value := strings.ToLower(strings.TrimSpace(family))
+	value = strings.ReplaceAll(value, ".", "")
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, "_", "")
+	return value
 }
 
 func kvQuantFactor(kind string) float64 {

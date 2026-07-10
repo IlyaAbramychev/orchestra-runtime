@@ -33,6 +33,11 @@ type Options struct {
 	// WorkerBinary is the path to the orchestra-worker executable. If empty,
 	// we look for `orchestra-worker` next to the running binary.
 	WorkerBinary string
+	// ExpectedVersion/ExpectedBuildCommit bind the worker to the host release.
+	// A protocol match alone is insufficient when wire-compatible builds carry
+	// different llama.cpp patches.
+	ExpectedVersion     string
+	ExpectedBuildCommit string
 	// SocketDir holds the Unix socket file. Defaults to os.TempDir().
 	SocketDir string
 	// Env vars injected into the worker process.
@@ -208,12 +213,40 @@ func (w *Worker) Spawn() (err error) {
 	// let callers in.
 	pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := w.Call(pingCtx, rpc.MethodPing, nil); err != nil {
+	rawPing, err := w.Call(pingCtx, rpc.MethodPing, nil)
+	if err != nil {
 		_ = w.Shutdown(context.Background())
 		return fmt.Errorf("worker ping failed: %w", err)
 	}
+	var ping rpc.PingResult
+	if err := json.Unmarshal(rawPing, &ping); err != nil {
+		_ = w.Shutdown(context.Background())
+		return fmt.Errorf("worker handshake invalid: %w", err)
+	}
+	if err := validateWorkerHandshake(ping, w.opts.ExpectedVersion, w.opts.ExpectedBuildCommit); err != nil {
+		_ = w.Shutdown(context.Background())
+		return err
+	}
 	slog.Info("worker spawned", "pid", cmd.Process.Pid, "socket", socketPath)
 	return nil
+}
+
+func validateWorkerHandshake(ping rpc.PingResult, expectedVersion, expectedBuildCommit string) error {
+	protocolMatches := ping.Pong && ping.ProtocolVersion == rpc.ProtocolVersion
+	versionMatches := expectedVersion == "" || ping.Version == expectedVersion
+	commitMatches := expectedBuildCommit == "" || expectedBuildCommit == "unknown" || ping.BuildCommit == expectedBuildCommit
+	if protocolMatches && versionMatches && commitMatches {
+		return nil
+	}
+	return fmt.Errorf(
+		"worker handshake mismatch: protocol host=%d worker=%d, version host=%s worker=%s, build host=%s worker=%s; install orchestra-runtime and orchestra-worker from the same release",
+		rpc.ProtocolVersion,
+		ping.ProtocolVersion,
+		expectedVersion,
+		ping.Version,
+		expectedBuildCommit,
+		ping.BuildCommit,
+	)
 }
 
 func dialWithRetry(path string, timeout time.Duration) (net.Conn, error) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ type fakeChatBackend struct {
 	completeErr      error
 	streamErr        error
 	streamChunks     []engine.CompletionChunk
+	embedResult      *engine.EmbeddingResult
 	embedErr         error
 	block            chan struct{}
 	lastParams       engine.CompletionParams
@@ -97,6 +99,9 @@ func (f *fakeChatBackend) CompleteStream(_ context.Context, messages []engine.Ch
 func (f *fakeChatBackend) Embed(context.Context, string, bool) (*engine.EmbeddingResult, error) {
 	if f.embedErr != nil {
 		return nil, f.embedErr
+	}
+	if f.embedResult != nil {
+		return f.embedResult, nil
 	}
 	return &engine.EmbeddingResult{}, nil
 }
@@ -495,6 +500,185 @@ func TestOpenAIChatStreamContextLengthErrorReturnsBadRequest(t *testing.T) {
 	if resp.Error.PromptTokens != 32801 || resp.Error.ContextSize != 12032 {
 		t.Fatalf("unexpected error message: %+v", resp)
 	}
+}
+
+func TestOpenAIChatForwardsMultimodalContentParts(t *testing.T) {
+	backend := &fakeChatBackend{completeText: "described"}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"messages":[{
+			"role":"user",
+			"content":[
+				{"type":"text","text":"before"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8=","detail":"high"}},
+				{"type":"text","text":"after"}
+			]
+		}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(backend.lastMessages) != 1 || len(backend.lastMessages[0].Parts) != 3 {
+		t.Fatalf("multimodal parts were not forwarded: %+v", backend.lastMessages)
+	}
+	if backend.lastMessages[0].Parts[1].ImageDetail != "high" {
+		t.Fatalf("image detail was not preserved: %+v", backend.lastMessages[0].Parts[1])
+	}
+}
+
+func TestOpenAIChatRejectsRemoteImageURL(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"describe"},
+			{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}
+		]}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error.Code != "remote_image_url_unsupported" {
+		t.Fatalf("error code = %q", response.Error.Code)
+	}
+}
+
+func TestOpenAIChatReturnsNativeToolCalls(t *testing.T) {
+	backend := &fakeChatBackend{completeText: `{"tool_calls":[{"function":{"name":"read_file","arguments":{"path":"README.md"}}}]}`}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"stream":false,
+		"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}],
+		"tool_choice":"auto",
+		"messages":[{"role":"user","content":"read README"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OpenAIChatCompletionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].FinishReason == nil || *resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("unexpected choices: %+v", resp.Choices)
+	}
+	message := resp.Choices[0].Message
+	if message == nil || message.Content != nil || len(message.ToolCalls) != 1 {
+		t.Fatalf("unexpected tool message: %+v", message)
+	}
+	call := message.ToolCalls[0]
+	if call.ID == "" || call.Function.Name != "read_file" || call.Function.Arguments != `{"path":"README.md"}` {
+		t.Fatalf("unexpected tool call: %+v", call)
+	}
+	if strings.Contains(backend.lastMessages[0].Content, "read_file") || !backend.lastParams.NativeChat || !strings.Contains(backend.lastParams.ToolsJSON, "read_file") {
+		t.Fatalf("tools were not passed through the native chat API: messages=%+v params=%+v", backend.lastMessages, backend.lastParams)
+	}
+}
+
+func TestOpenAIChatStreamsBufferedNativeToolCalls(t *testing.T) {
+	backend := &fakeChatBackend{streamChunks: []engine.CompletionChunk{
+		{Text: `{"tool_calls":[{"function":{"name":"read_file","arguments":{"path":"README.md"}}}]}`},
+		{Done: true, FinishReason: "stop", PromptTokens: 4, CompletionTokens: 3},
+	}}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"stream":true,
+		"tools":[{"type":"function","function":{"name":"read_file"}}],
+		"parallel_tool_calls":false,
+		"messages":[{"role":"user","content":"read README"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	dataLines := openAISSEDataLines(t, rec.Body.String())
+	if len(dataLines) != 3 || dataLines[2] != "[DONE]" {
+		t.Fatalf("unexpected SSE frames: %#v", dataLines)
+	}
+	var first model.OpenAIChatCompletionChunk
+	if err := json.Unmarshal([]byte(dataLines[0]), &first); err != nil {
+		t.Fatalf("decode first chunk: %v", err)
+	}
+	if len(first.Choices) != 1 || first.Choices[0].Delta == nil || len(first.Choices[0].Delta.ToolCalls) != 1 {
+		t.Fatalf("missing streamed tool call: %+v", first)
+	}
+	call := first.Choices[0].Delta.ToolCalls[0]
+	if call.Index == nil || *call.Index != 0 || call.Function.Name != "read_file" {
+		t.Fatalf("unexpected streamed tool call: %+v", call)
+	}
+	var final model.OpenAIChatCompletionChunk
+	if err := json.Unmarshal([]byte(dataLines[1]), &final); err != nil {
+		t.Fatalf("decode final chunk: %v", err)
+	}
+	if final.Choices[0].FinishReason == nil || *final.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("unexpected final chunk: %+v", final)
+	}
+}
+
+func TestOpenAIChatRequiredToolCallRejectsPlainAnswer(t *testing.T) {
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{completeText: "plain answer"}, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"tools":[{"type":"function","function":{"name":"read_file"}}],
+		"tool_choice":"required",
+		"messages":[{"role":"user","content":"read README"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var response model.OpenAIChatCompletionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Choices) != 1 || response.Choices[0].FinishReason == nil || *response.Choices[0].FinishReason != "tool_protocol_error" {
+		t.Fatalf("expected tool_protocol_error, got %+v", response.Choices)
+	}
+}
+
+func openAISSEDataLines(t *testing.T, body string) []string {
+	t.Helper()
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			lines = append(lines, strings.TrimPrefix(line, "data: "))
+		}
+	}
+	return lines
 }
 
 func TestNoModelLoadedMapsToNotFound(t *testing.T) {

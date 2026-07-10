@@ -128,6 +128,35 @@ func TestInferenceAutoLoadsRequestedModel(t *testing.T) {
 	}
 }
 
+func TestDefaultLoadOptionsForModelUsesRecommendationOnlyWithUntouchedDefault(t *testing.T) {
+	registry, err := storage.NewModelRegistry(t.TempDir())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID:     "recommended",
+		Name:   "qwen",
+		Status: "ready",
+		RecommendedSettings: storage.RecommendedModelSettings{
+			ContextSize: 8192,
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	manager := NewModelManager(registry, &autoLoadBackend{}, t.TempDir())
+	if got := manager.DefaultLoadOptionsForModel("recommended").CtxSize; got != 8192 {
+		t.Fatalf("automatic context = %d; want 8192", got)
+	}
+
+	configured := engine.DefaultLoadOptions()
+	configured.CtxSize = 32768
+	manager.SetDefaultLoadOptions(configured)
+	if got := manager.DefaultLoadOptionsForModel("recommended").CtxSize; got != 32768 {
+		t.Fatalf("explicit global context = %d; want 32768", got)
+	}
+}
+
 func TestInferenceAutoLoadsModelScopedMMProj(t *testing.T) {
 	tmp := t.TempDir()
 	registry, err := storage.NewModelRegistry(tmp)

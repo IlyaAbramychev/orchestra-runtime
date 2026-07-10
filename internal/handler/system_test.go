@@ -71,7 +71,7 @@ func TestCapabilitiesReportsFeatureSupport(t *testing.T) {
 		features[feature.Name] = feature.Status
 		featureNotes[feature.Name] = feature.Notes
 	}
-	if features["tool_calls_non_streaming"] != "supported" {
+	if features["tool_calls_non_streaming"] != "partial" {
 		t.Fatalf("tool_calls_non_streaming = %q", features["tool_calls_non_streaming"])
 	}
 	if features["multimodal_images"] != "partial" {

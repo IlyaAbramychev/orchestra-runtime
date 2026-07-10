@@ -47,6 +47,7 @@ type FeatureCapability struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	Notes  string `json:"notes,omitempty"`
+	Details interface{} `json:"details,omitempty"`
 }
 
 type GPUInfo struct {

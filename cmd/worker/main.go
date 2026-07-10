@@ -151,7 +151,13 @@ func (w *worker) dispatch(ctx context.Context, c *rpc.Codec, env *rpc.Envelope) 
 
 	switch env.Method {
 	case rpc.MethodPing:
-		_ = c.Write(finalOK(env.ID, map[string]any{"pong": true}))
+		_ = c.Write(finalOK(env.ID, rpc.PingResult{
+			Pong:            true,
+			ProtocolVersion: rpc.ProtocolVersion,
+			Version:         version,
+			BuildCommit:     buildCommit,
+			LlamaCppCommit:  llamaCppCommit,
+		}))
 
 	case rpc.MethodStatus:
 		opts := w.engine.LoadedOptions()
@@ -285,7 +291,11 @@ func (w *worker) handleComplete(ctx context.Context, c *rpc.Codec, env *rpc.Enve
 	}
 	_ = c.Write(finalOK(env.ID, rpc.CompleteResult{
 		Text:             result.Text,
+		Reasoning:        result.Reasoning,
+		ToolCalls:        toRPCToolCalls(result.ToolCalls),
 		PromptTokens:     result.PromptTokens,
+		TextPromptTokens: result.TextPromptTokens,
+		VisionTokens:     result.VisionTokens,
 		CompletionTokens: result.CompletionTokens,
 		FinishReason:     result.FinishReason,
 		Timings: rpc.Timings{
@@ -328,9 +338,13 @@ func (w *worker) handleCompleteStream(ctx context.Context, c *rpc.Codec, env *rp
 		}
 		payload := rpc.StreamChunk{
 			Text:             chunk.Text,
+			Reasoning:        chunk.Reasoning,
+			ToolCalls:        toRPCToolCalls(chunk.ToolCalls),
 			Done:             chunk.Done,
 			FinishReason:     chunk.FinishReason,
 			PromptTokens:     chunk.PromptTokens,
+			TextPromptTokens: chunk.TextPromptTokens,
+			VisionTokens:     chunk.VisionTokens,
 			CompletionTokens: chunk.CompletionTokens,
 			Timings: rpc.Timings{
 				TotalNs:      chunk.Timings.TotalNs,
@@ -384,31 +398,72 @@ func finalErr(id, code, msg string) *rpc.Envelope {
 func toEngineMessages(in []rpc.ChatMessage) []engine.ChatMessage {
 	out := make([]engine.ChatMessage, len(in))
 	for i, m := range in {
-		out[i] = engine.ChatMessage{Role: m.Role, Content: m.Content, Images: append([]string(nil), m.Images...)}
+		parts := make([]engine.ContentPart, len(m.Parts))
+		for partIndex, part := range m.Parts {
+			parts[partIndex] = engine.ContentPart{
+				Type:        part.Type,
+				Text:        part.Text,
+				ImageURL:    part.ImageURL,
+				ImageDetail: part.ImageDetail,
+			}
+		}
+		out[i] = engine.ChatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			Reasoning:  m.Reasoning,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  fromRPCToolCalls(m.ToolCalls),
+			Parts:      parts,
+			Images:     append([]string(nil), m.Images...),
+		}
 	}
 	return out
 }
 
 func toEngineParams(p rpc.CompletionParams) engine.CompletionParams {
 	return engine.CompletionParams{
-		MaxTokens:        p.MaxTokens,
-		Temperature:      p.Temperature,
-		TopK:             p.TopK,
-		TopP:             p.TopP,
-		MinP:             p.MinP,
-		TypicalP:         p.TypicalP,
-		RepeatPenalty:    p.RepeatPenalty,
-		RepeatLastN:      p.RepeatLastN,
-		FrequencyPenalty: p.FrequencyPenalty,
-		PresencePenalty:  p.PresencePenalty,
-		Seed:             p.Seed,
-		Mirostat:         p.Mirostat,
-		MirostatTau:      p.MirostatTau,
-		MirostatEta:      p.MirostatEta,
-		Stop:             p.Stop,
-		RawPrompt:        p.RawPrompt,
-		Grammar:          p.Grammar,
+		MaxTokens:         p.MaxTokens,
+		Temperature:       p.Temperature,
+		TopK:              p.TopK,
+		TopP:              p.TopP,
+		MinP:              p.MinP,
+		TypicalP:          p.TypicalP,
+		RepeatPenalty:     p.RepeatPenalty,
+		RepeatLastN:       p.RepeatLastN,
+		FrequencyPenalty:  p.FrequencyPenalty,
+		PresencePenalty:   p.PresencePenalty,
+		Seed:              p.Seed,
+		Mirostat:          p.Mirostat,
+		MirostatTau:       p.MirostatTau,
+		MirostatEta:       p.MirostatEta,
+		Stop:              p.Stop,
+		ChatTemplate:      p.ChatTemplate,
+		RawPrompt:         p.RawPrompt,
+		Grammar:           p.Grammar,
+		NativeChat:        p.NativeChat,
+		ToolsJSON:         p.ToolsJSON,
+		ToolChoice:        p.ToolChoice,
+		ParallelToolCalls: p.ParallelToolCalls,
+		ThinkingSet:       p.ThinkingSet,
+		EnableThinking:    p.EnableThinking,
 	}
+}
+
+func toRPCToolCalls(in []engine.ToolCall) []rpc.ToolCall {
+	out := make([]rpc.ToolCall, len(in))
+	for i, call := range in {
+		out[i] = rpc.ToolCall{ID: call.ID, Name: call.Name, Arguments: append(json.RawMessage(nil), call.Arguments...)}
+	}
+	return out
+}
+
+func fromRPCToolCalls(in []rpc.ToolCall) []engine.ToolCall {
+	out := make([]engine.ToolCall, len(in))
+	for i, call := range in {
+		out[i] = engine.ToolCall{ID: call.ID, Name: call.Name, Arguments: append(json.RawMessage(nil), call.Arguments...)}
+	}
+	return out
 }
 
 func parseLogLevel(s string) slog.Level {

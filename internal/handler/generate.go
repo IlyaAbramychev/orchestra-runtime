@@ -38,6 +38,10 @@ func (h *GenerateHandler) Generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validateMultimodalMessages([]model.ChatMessage{{Images: req.Images}}); err != nil {
+		writeRuntimeError(w, err)
+		return
+	}
 	if err := validateThinkOption(req.Think); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -116,11 +120,7 @@ func (h *GenerateHandler) handleCompletion(
 		Choices: []model.CompletionChoice{
 			{Text: result.Text, Index: 0, FinishReason: &result.FinishReason},
 		},
-		Usage: &model.Usage{
-			PromptTokens:     result.PromptTokens,
-			CompletionTokens: result.CompletionTokens,
-			TotalTokens:      result.PromptTokens + result.CompletionTokens,
-		},
+		Usage: completionUsage(result.PromptTokens, result.CompletionTokens, result.TextPromptTokens, result.VisionTokens),
 		Timings: &model.Timings{
 			TotalDurationNs:      result.Timings.TotalNs,
 			PromptEvalDurationNs: result.Timings.PromptEvalNs,

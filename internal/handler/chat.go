@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/model"
 	"github.com/operium/orchestra-runtime/internal/service"
 )
@@ -24,7 +25,7 @@ func NewChatHandler(inference *service.InferenceService) *ChatHandler {
 func (h *ChatHandler) ChatCompletion(w http.ResponseWriter, r *http.Request) {
 	var req model.ChatCompletionRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
 
@@ -32,13 +33,26 @@ func (h *ChatHandler) ChatCompletion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "messages is required")
 		return
 	}
+	if err := validateMultimodalMessages(req.Messages); err != nil {
+		writeRuntimeError(w, err)
+		return
+	}
+	toolMode, err := applyOpenAIToolInstructions(&req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if req.Stream {
+		if toolMode.active {
+			h.handleOpenAIToolStream(w, r, &req, toolMode)
+			return
+		}
 		h.handleStream(w, r, &req)
 		return
 	}
 
-	h.handleComplete(w, r, &req)
+	h.handleComplete(w, r, &req, toolMode)
 }
 
 // ChatOllama handles POST /api/chat using Ollama's JSON/NDJSON response
@@ -51,6 +65,10 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "messages is required")
+		return
+	}
+	if err := validateMultimodalMessages(req.Messages); err != nil {
+		writeRuntimeError(w, err)
 		return
 	}
 	if err := validateThinkOption(req.Think); err != nil {
@@ -80,11 +98,9 @@ func (h *ChatHandler) ChatOllama(w http.ResponseWriter, r *http.Request) {
 	} else if ok {
 		chatReq.Grammar = grammar
 	}
-	if instruction, ok, err := toolCallInstruction(req.Tools); err != nil {
+	if _, _, err := toolCallInstruction(req.Tools); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	} else if ok {
-		chatReq.Messages = withStructuredInstruction(chatReq.Messages, instruction)
 	}
 	if stream {
 		if shouldBufferOllamaChatStream(&req) {
@@ -113,8 +129,14 @@ func (h *ChatHandler) handleOllamaComplete(
 		writeRuntimeError(w, err)
 		return
 	}
-	content, thinking := applyThinkingOutput(req.Think, result.Text)
-	toolCalls, hasToolCalls, err := parseToolCallsFromText(content, req.Tools)
+	content, thinking := result.Text, result.Reasoning
+	if result.FinishReason == "tool_protocol_error" {
+		content = ""
+	}
+	if thinking == "" {
+		content, thinking = applyThinkingOutput(req.Think, result.Text)
+	}
+	toolCalls, hasToolCalls, err := resolvedToolCalls(result.ToolCalls, content, req.Tools)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -241,8 +263,14 @@ func (h *ChatHandler) handleOllamaBufferedStream(
 		return
 	}
 
-	content, thinking := applyThinkingOutput(req.Think, text)
-	toolCalls, hasToolCalls, err := parseToolCallsFromText(content, req.Tools)
+	content, thinking := text, final.Reasoning
+	if final.FinishReason == "tool_protocol_error" {
+		content = ""
+	}
+	if thinking == "" {
+		content, thinking = applyThinkingOutput(req.Think, text)
+	}
+	toolCalls, hasToolCalls, err := resolvedToolCalls(final.ToolCalls, content, req.Tools)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		h.inference.ApplyKeepAlive(req.KeepAlive)
@@ -318,7 +346,12 @@ func writeOllamaChatStreamResponse(w http.ResponseWriter, flusher http.Flusher, 
 	}
 }
 
-func (h *ChatHandler) handleComplete(w http.ResponseWriter, r *http.Request, req *model.ChatCompletionRequest) {
+func (h *ChatHandler) handleComplete(
+	w http.ResponseWriter,
+	r *http.Request,
+	req *model.ChatCompletionRequest,
+	toolMode openAIToolMode,
+) {
 	result, err := h.inference.Complete(r.Context(), req)
 	if err != nil {
 		slog.Error("completion failed", "error", err)
@@ -330,6 +363,43 @@ func (h *ChatHandler) handleComplete(w http.ResponseWriter, r *http.Request, req
 	// response; unload happens on the next engine tick.
 	h.inference.ApplyKeepAlive(req.KeepAlive)
 
+	if toolMode.active {
+		toolCalls, hasToolCalls, parseErr := resolvedToolCalls(result.ToolCalls, result.Text, req.Tools)
+		if parseErr != nil {
+			writeOpenAIToolProtocolError(w, req, result, parseErr)
+			return
+		}
+		if validationErr := validateOpenAIToolResult(toolMode, toolCalls, hasToolCalls); validationErr != nil {
+			writeOpenAIToolProtocolError(w, req, result, validationErr)
+			return
+		}
+		if result.FinishReason == "tool_protocol_error" {
+			writeOpenAIToolProtocolError(w, req, result, fmt.Errorf("model returned a malformed tool call"))
+			return
+		}
+		if hasToolCalls {
+			finishReason := "tool_calls"
+			writeJSON(w, http.StatusOK, model.OpenAIChatCompletionResponse{
+				ID:      "chatcmpl-" + uuid.New().String()[:8],
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   req.Model,
+				Choices: []model.OpenAIChoice{{
+					Index: 0,
+					Message: &model.OpenAIResponseMessage{
+						Role:      "assistant",
+						Content:   nil,
+						ToolCalls: toOpenAIToolCalls(toolCalls, false),
+					},
+					FinishReason: &finishReason,
+				}},
+				Usage:   completionUsage(result.PromptTokens, result.CompletionTokens, result.TextPromptTokens, result.VisionTokens),
+				Timings: completionTimings(result),
+			})
+			return
+		}
+	}
+
 	resp := model.ChatCompletionResponse{
 		ID:      "chatcmpl-" + uuid.New().String()[:8],
 		Object:  "chat.completion",
@@ -339,33 +409,186 @@ func (h *ChatHandler) handleComplete(w http.ResponseWriter, r *http.Request, req
 			{
 				Index: 0,
 				Message: &model.ChatMessage{
-					Role:    "assistant",
-					Content: result.Text,
+					Role:             "assistant",
+					Content:          result.Text,
+					ReasoningContent: result.Reasoning,
 				},
 				FinishReason: &result.FinishReason,
 			},
 		},
-		Usage: &model.Usage{
-			PromptTokens:     result.PromptTokens,
-			CompletionTokens: result.CompletionTokens,
-			TotalTokens:      result.PromptTokens + result.CompletionTokens,
-		},
-		Timings: &model.Timings{
-			TotalDurationNs:      result.Timings.TotalNs,
-			PromptEvalDurationNs: result.Timings.PromptEvalNs,
-			PromptEvalCount:      result.PromptTokens,
-			EvalDurationNs:       result.Timings.EvalNs,
-			EvalCount:            result.CompletionTokens,
-		},
+		Usage:   completionUsage(result.PromptTokens, result.CompletionTokens, result.TextPromptTokens, result.VisionTokens),
+		Timings: completionTimings(result),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func completionTimings(result *engine.CompletionResult) *model.Timings {
+	return &model.Timings{
+		TotalDurationNs:      result.Timings.TotalNs,
+		PromptEvalDurationNs: result.Timings.PromptEvalNs,
+		PromptEvalCount:      result.PromptTokens,
+		EvalDurationNs:       result.Timings.EvalNs,
+		EvalCount:            result.CompletionTokens,
+	}
+}
+
+func writeOpenAIToolProtocolError(w http.ResponseWriter, req *model.ChatCompletionRequest, result *engine.CompletionResult, cause error) {
+	slog.Warn("model returned invalid tool protocol", "model", req.Model, "error", cause)
+	finishReason := "tool_protocol_error"
+	writeJSON(w, http.StatusOK, model.OpenAIChatCompletionResponse{
+		ID:      "chatcmpl-" + uuid.New().String()[:8],
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   req.Model,
+		Choices: []model.OpenAIChoice{{
+			Index: 0,
+			Message: &model.OpenAIResponseMessage{
+				Role:             "assistant",
+				Content:          nil,
+				ReasoningContent: result.Reasoning,
+			},
+			FinishReason: &finishReason,
+		}},
+		Usage:   completionUsage(result.PromptTokens, result.CompletionTokens, result.TextPromptTokens, result.VisionTokens),
+		Timings: completionTimings(result),
+	})
+}
+
+func completionUsage(promptTokens, completionTokens, textPromptTokens, visionTokens int) *model.Usage {
+	usage := &model.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
+	if textPromptTokens > 0 || visionTokens > 0 {
+		usage.PromptTokensDetails = &model.PromptTokensDetails{
+			TextTokens:   textPromptTokens,
+			VisionTokens: visionTokens,
+		}
+	}
+	return usage
+}
+
+func (h *ChatHandler) handleOpenAIToolStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	req *model.ChatCompletionRequest,
+	toolMode openAIToolMode,
+) {
+	ch, err := h.inference.CompleteStream(r.Context(), req)
+	if err != nil {
+		slog.Error("OpenAI tool stream failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+	text, final, err := collectCompletionStream(ch)
+	h.inference.ApplyKeepAlive(req.KeepAlive)
+	if err != nil {
+		slog.Error("OpenAI tool stream chunk failed", "error", err)
+		writeRuntimeError(w, err)
+		return
+	}
+	toolCalls, hasToolCalls, err := resolvedToolCalls(final.ToolCalls, text, req.Tools)
+	if err != nil {
+		final.FinishReason = "tool_protocol_error"
+		toolCalls = nil
+		hasToolCalls = false
+	}
+	if validationErr := validateOpenAIToolResult(toolMode, toolCalls, hasToolCalls); validationErr != nil {
+		final.FinishReason = "tool_protocol_error"
+		toolCalls = nil
+		hasToolCalls = false
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	id := "chatcmpl-" + uuid.New().String()[:8]
+	created := time.Now().Unix()
+	if hasToolCalls {
+		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   req.Model,
+			Choices: []model.OpenAIChunkChoice{{
+				Index: 0,
+				Delta: &model.OpenAIResponseDelta{
+					Role:      "assistant",
+					ToolCalls: toOpenAIToolCalls(toolCalls, true),
+				},
+			}},
+		})
+	} else if text != "" {
+		content := text
+		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   req.Model,
+			Choices: []model.OpenAIChunkChoice{{
+				Index: 0,
+				Delta: &model.OpenAIResponseDelta{Role: "assistant", Content: &content},
+			}},
+		})
+	}
+	if final.Reasoning != "" {
+		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			Choices: []model.OpenAIChunkChoice{{Index: 0, Delta: &model.OpenAIResponseDelta{Role: "assistant", ReasoningContent: final.Reasoning}}},
+		})
+	}
+
+	finishReason := final.FinishReason
+	if hasToolCalls {
+		finishReason = "tool_calls"
+	}
+	writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
+		ID:      id,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   req.Model,
+		Choices: []model.OpenAIChunkChoice{{
+			Index:        0,
+			Delta:        &model.OpenAIResponseDelta{},
+			FinishReason: &finishReason,
+		}},
+		Usage: completionUsage(final.PromptTokens, final.CompletionTokens, final.TextPromptTokens, final.VisionTokens),
+		Timings: &model.Timings{
+			TotalDurationNs:      final.Timings.TotalNs,
+			PromptEvalDurationNs: final.Timings.PromptEvalNs,
+			PromptEvalCount:      final.PromptTokens,
+			EvalDurationNs:       final.Timings.EvalNs,
+			EvalCount:            final.CompletionTokens,
+		},
+	})
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func writeOpenAISSE(w http.ResponseWriter, flusher http.Flusher, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	flusher.Flush()
 }
 
 func ollamaToChatCompletionRequest(req *model.OllamaChatRequest) *model.ChatCompletionRequest {
 	out := &model.ChatCompletionRequest{
 		Model:     req.Model,
 		Messages:  req.Messages,
+		Tools:     req.Tools,
+		Think:     req.Think,
 		KeepAlive: req.KeepAlive,
 	}
 	if req.Options == nil {
@@ -444,11 +667,7 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *
 						FinishReason: &chunk.FinishReason,
 					},
 				},
-				Usage: &model.Usage{
-					PromptTokens:     chunk.PromptTokens,
-					CompletionTokens: chunk.CompletionTokens,
-					TotalTokens:      chunk.PromptTokens + chunk.CompletionTokens,
-				},
+				Usage: completionUsage(chunk.PromptTokens, chunk.CompletionTokens, chunk.TextPromptTokens, chunk.VisionTokens),
 				Timings: &model.Timings{
 					TotalDurationNs:      chunk.Timings.TotalNs,
 					PromptEvalDurationNs: chunk.Timings.PromptEvalNs,

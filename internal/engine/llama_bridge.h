@@ -73,6 +73,25 @@ typedef struct bridge_mtmd_eval_result {
     char *error;
 } bridge_mtmd_eval_result;
 
+typedef struct bridge_chat_render_result {
+    char *prompt;
+    char *grammar;
+    char *parser;
+    char *generation_prompt;
+    char *additional_stops_json;
+    char *grammar_triggers_json;
+    char *capabilities_json;
+    char *error;
+    int32_t format;
+    bool grammar_lazy;
+    bool supports_thinking;
+} bridge_chat_render_result;
+
+typedef struct bridge_chat_parse_result {
+    char *message_json;
+    char *error;
+} bridge_chat_parse_result;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -91,6 +110,47 @@ bridge_mtmd_eval_result bridge_mtmd_eval_prompt(
     int32_t n_batch
 );
 void bridge_mtmd_eval_result_free(bridge_mtmd_eval_result result);
+bridge_chat_render_result bridge_chat_render_native(
+    const struct llama_model *model,
+    const char *template_override,
+    const char *messages_json,
+    const char *tools_json,
+    int32_t tool_choice,
+    bool parallel_tool_calls,
+    bool enable_thinking
+);
+void bridge_chat_render_result_free(bridge_chat_render_result result);
+bridge_chat_parse_result bridge_chat_parse_native(
+    const char *response,
+    const char *parser,
+    const char *generation_prompt,
+    int32_t format
+);
+void bridge_chat_parse_result_free(bridge_chat_parse_result result);
+
+// Creates the grammar sampler produced by llama.cpp's native chat-template
+// pipeline, including lazy tool-call triggers and generation-prompt prefill.
+struct llama_sampler * bridge_chat_grammar_sampler_init(
+    const struct llama_vocab * vocab,
+    const char * grammar,
+    bool grammar_lazy,
+    const char * grammar_triggers_json,
+    const char * generation_prompt,
+    char ** error);
+void bridge_string_free(char * value);
+
+struct common_sampler;
+struct common_sampler * bridge_common_sampler_init(
+    const struct llama_model * model,
+    const char * options_json,
+    const char * grammar,
+    bool grammar_lazy,
+    const char * grammar_triggers_json,
+    const char * generation_prompt,
+    char ** error);
+llama_token bridge_common_sampler_sample(struct common_sampler * sampler, struct llama_context * ctx, int32_t idx);
+void bridge_common_sampler_accept(struct common_sampler * sampler, llama_token token);
+void bridge_common_sampler_free(struct common_sampler * sampler);
 
 #ifdef __cplusplus
 }

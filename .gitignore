@@ -40,3 +40,4 @@ go.work.sum
 # ── Logs ───────────────────────────────────────────────────────────────────
 *.log
 logs/
+.orchestra/session-progress.md

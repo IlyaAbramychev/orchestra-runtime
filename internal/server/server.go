@@ -55,7 +55,9 @@ func (s *Server) Start() error {
 	if os.Getenv("ORCHESTRA_USE_SUBPROCESS") == "1" {
 		workerBin := os.Getenv("ORCHESTRA_WORKER_BINARY")
 		w := supervisor.NewWorker(supervisor.Options{
-			WorkerBinary: workerBin,
+			WorkerBinary:        workerBin,
+			ExpectedVersion:     service.Version,
+			ExpectedBuildCommit: service.BuildCommit,
 		})
 		s.backend = supervisor.NewRemote(w)
 		slog.Info("inference backend: subprocess (worker)",

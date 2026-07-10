@@ -6,11 +6,61 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/rpc"
 )
+
+func TestToRPCParamsPreservesChatTemplate(t *testing.T) {
+	got := toRPCParams(engine.CompletionParams{ChatTemplate: "{{ custom_template }}"})
+	if got.ChatTemplate != "{{ custom_template }}" {
+		t.Fatalf("chat template lost in host RPC conversion: %q", got.ChatTemplate)
+	}
+}
+
+func TestValidateWorkerHandshakeRejectsMixedProtocolVersions(t *testing.T) {
+	err := validateWorkerHandshake(rpc.PingResult{
+		Pong:            true,
+		ProtocolVersion: rpc.ProtocolVersion - 1,
+		Version:         "0.3.3",
+		BuildCommit:     "old-worker",
+	}, "0.4.0", "new-host")
+	if err == nil || !strings.Contains(err.Error(), "same release") {
+		t.Fatalf("expected actionable protocol mismatch, got %v", err)
+	}
+	if err := validateWorkerHandshake(rpc.PingResult{Pong: true, ProtocolVersion: rpc.ProtocolVersion, Version: "0.4.0", BuildCommit: "same"}, "0.4.0", "same"); err != nil {
+		t.Fatalf("matching protocol was rejected: %v", err)
+	}
+}
+
+func TestValidateWorkerHandshakeRejectsDifferentBuildAtSameProtocol(t *testing.T) {
+	err := validateWorkerHandshake(rpc.PingResult{
+		Pong: true, ProtocolVersion: rpc.ProtocolVersion, Version: "0.4.0", BuildCommit: "worker-build",
+	}, "0.4.0", "host-build")
+	if err == nil || !strings.Contains(err.Error(), "version host=0.4.0 worker=0.4.0") {
+		t.Fatalf("expected build mismatch, got %v", err)
+	}
+}
+
+func TestToRPCMessagesPreservesMultimodalParts(t *testing.T) {
+	got := toRPCMessages([]engine.ChatMessage{{
+		Role: "user",
+		Parts: []engine.ContentPart{{
+			Type:        "image_url",
+			ImageURL:    "data:image/png;base64,aGVsbG8=",
+			ImageDetail: "high",
+		}},
+	}})
+	if len(got) != 1 || len(got[0].Parts) != 1 {
+		t.Fatalf("parts lost in RPC conversion: %+v", got)
+	}
+	if got[0].Parts[0].ImageDetail != "high" {
+		t.Fatalf("image detail lost: %+v", got[0].Parts[0])
+	}
+}
 
 func TestCallStreamSendsCancelOnce(t *testing.T) {
 	client, server := net.Pipe()

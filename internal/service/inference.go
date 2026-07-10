@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
@@ -27,6 +28,7 @@ type ModelRequestDefaults struct {
 type ModelLoader interface {
 	EnsureLoaded(ctx context.Context, model string) error
 	EnsureLoadedFor(ctx context.Context, model, capability string) error
+	ResolveModelID(model string) (string, error)
 	DefaultsForModel(model string) (ModelRequestDefaults, error)
 }
 
@@ -45,14 +47,56 @@ func (s *InferenceService) SetModelLoader(loader ModelLoader) {
 	s.loader = loader
 }
 
-func (s *InferenceService) ensureLoaded(ctx context.Context, model string) error {
-	if s.loader != nil && model != "" {
-		return s.loader.EnsureLoadedFor(ctx, model, "chat")
+// acquireLoadedModel closes the race between request-scoped auto-load and
+// inference. Auto-load uses the scheduler itself, so it must finish before we
+// acquire the inference slot. Another queued request may switch the model in
+// that small gap; after acquiring, verify the resolved registry ID and retry
+// the load instead of ever running against the wrong model.
+func acquireLoadedModel(
+	ctx context.Context,
+	scheduler *RuntimeScheduler,
+	backend engine.Backend,
+	loader ModelLoader,
+	model string,
+	capability string,
+) (func(), error) {
+	for {
+		expectedModelID := ""
+		if loader != nil && model != "" {
+			resolvedID, err := loader.ResolveModelID(model)
+			if err != nil {
+				return nil, err
+			}
+			expectedModelID = resolvedID
+			if err := loader.EnsureLoadedFor(ctx, model, capability); err != nil {
+				return nil, err
+			}
+		} else if !backend.IsLoaded() {
+			return nil, fmt.Errorf("no model loaded")
+		}
+
+		activeModelID := expectedModelID
+		if activeModelID == "" {
+			activeModelID = backend.LoadedModelID()
+		}
+		release, err := scheduler.acquireFor(ctx, engine.StateGenerating, activeModelID)
+		if err != nil {
+			return nil, err
+		}
+
+		if !backend.IsLoaded() {
+			release()
+			if expectedModelID != "" {
+				continue
+			}
+			return nil, fmt.Errorf("no model loaded")
+		}
+		if expectedModelID != "" && backend.LoadedModelID() != expectedModelID {
+			release()
+			continue
+		}
+		return release, nil
 	}
-	if !s.engine.IsLoaded() {
-		return fmt.Errorf("no model loaded")
-	}
-	return nil
 }
 
 func (s *InferenceService) applyModelDefaults(model string, params *engine.CompletionParams) {
@@ -120,15 +164,12 @@ func (s *InferenceService) Generate(
 	images []string,
 	params engine.CompletionParams,
 ) (*engine.CompletionResult, error) {
-	if err := s.ensureLoaded(ctx, model); err != nil {
-		return nil, err
-	}
-	s.applyModelDefaults(model, &params)
-	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, "chat")
 	if err != nil {
 		return nil, err
 	}
 	defer release()
+	s.applyModelDefaults(model, &params)
 
 	msgs := buildGenerateMessages(prompt, system, images, &params)
 	return s.engine.Complete(ctx, msgs, params)
@@ -142,14 +183,11 @@ func (s *InferenceService) GenerateStream(
 	images []string,
 	params engine.CompletionParams,
 ) (<-chan engine.CompletionChunk, error) {
-	if err := s.ensureLoaded(ctx, model); err != nil {
-		return nil, err
-	}
-	s.applyModelDefaults(model, &params)
-	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, "chat")
 	if err != nil {
 		return nil, err
 	}
+	s.applyModelDefaults(model, &params)
 
 	msgs := buildGenerateMessages(prompt, system, images, &params)
 	ch, err := s.engine.CompleteStream(ctx, msgs, params)
@@ -178,11 +216,7 @@ func buildGenerateMessages(prompt, system string, images []string, params *engin
 
 // Complete runs a non-streaming chat completion.
 func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompletionRequest) (*engine.CompletionResult, error) {
-	if err := s.ensureLoaded(ctx, req.Model); err != nil {
-		return nil, err
-	}
-
-	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, "chat")
 	if err != nil {
 		return nil, err
 	}
@@ -197,11 +231,7 @@ func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompleti
 
 // CompleteStream runs a streaming chat completion.
 func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCompletionRequest) (<-chan engine.CompletionChunk, error) {
-	if err := s.ensureLoaded(ctx, req.Model); err != nil {
-		return nil, err
-	}
-
-	release, err := s.scheduler.acquireFor(ctx, engine.StateGenerating, s.engine.LoadedModelID())
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, "chat")
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +252,33 @@ func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCo
 func toEngineMessages(msgs []model.ChatMessage) []engine.ChatMessage {
 	result := make([]engine.ChatMessage, len(msgs))
 	for i, m := range msgs {
-		result[i] = engine.ChatMessage{Role: m.Role, Content: m.Content, Images: append([]string(nil), m.Images...)}
+		toolCalls := make([]engine.ToolCall, 0, len(m.ToolCalls))
+		for _, call := range m.ToolCalls {
+			arguments, err := json.Marshal(call.Function.Arguments)
+			if err != nil {
+				arguments = []byte(`{}`)
+			}
+			toolCalls = append(toolCalls, engine.ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: arguments})
+		}
+		parts := make([]engine.ContentPart, len(m.Parts))
+		for partIndex, part := range m.Parts {
+			parts[partIndex] = engine.ContentPart{
+				Type:        part.Type,
+				Text:        part.Text,
+				ImageURL:    part.ImageURL,
+				ImageDetail: part.ImageDetail,
+			}
+		}
+		result[i] = engine.ChatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			Reasoning:  firstNonBlank(m.ReasoningContent, m.Thinking),
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  toolCalls,
+			Parts:      parts,
+			Images:     append([]string(nil), m.Images...),
+		}
 	}
 	return result
 }
@@ -280,5 +336,69 @@ func toEngineParams(req *model.ChatCompletionRequest) engine.CompletionParams {
 		params.Stop = req.Stop
 	}
 	params.Grammar = req.Grammar
+	params.NativeChat = len(req.Tools) > 0 || len(req.Think) > 0 || req.ReasoningEffort != "" || messagesNeedNativeChat(req.Messages)
+	if len(req.Tools) > 0 {
+		if encoded, err := json.Marshal(req.Tools); err == nil {
+			params.ToolsJSON = string(encoded)
+		}
+		params.ToolChoice = nativeToolChoice(req.ToolChoice)
+		params.ParallelToolCalls = req.ParallelToolCalls == nil || *req.ParallelToolCalls
+	}
+	if len(req.Think) > 0 {
+		params.ThinkingSet = true
+		params.EnableThinking = thinkEnabled(req.Think)
+	} else if req.ReasoningEffort != "" {
+		params.ThinkingSet = true
+		params.EnableThinking = req.ReasoningEffort != "none"
+	}
 	return params
+}
+
+func messagesNeedNativeChat(messages []model.ChatMessage) bool {
+	for _, message := range messages {
+		if message.ReasoningContent != "" || message.Thinking != "" || len(message.ToolCalls) > 0 || message.ToolCallID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func nativeToolChoice(raw json.RawMessage) int {
+	var choice string
+	if json.Unmarshal(raw, &choice) == nil {
+		switch choice {
+		case "required":
+			return 1
+		case "none":
+			return 2
+		}
+	}
+	if len(raw) > 0 {
+		var forced model.OpenAIToolChoice
+		if json.Unmarshal(raw, &forced) == nil && forced.Function.Name != "" {
+			return 1
+		}
+	}
+	return 0
+}
+
+func thinkEnabled(raw json.RawMessage) bool {
+	var enabled bool
+	if json.Unmarshal(raw, &enabled) == nil {
+		return enabled
+	}
+	var level string
+	if json.Unmarshal(raw, &level) == nil {
+		return level != "none" && level != "false" && level != "off"
+	}
+	return true
 }
