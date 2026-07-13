@@ -211,7 +211,14 @@ func (w *Worker) Spawn() (err error) {
 
 	// Sanity ping — ensures the codec + dispatch loop are alive before we
 	// let callers in.
-	pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Metal pipeline initialization can take several seconds on a cold start.
+	// Reuse the worker boot budget instead of failing an otherwise healthy
+	// process with a much shorter, unrelated two-second ping deadline.
+	pingTimeout := w.opts.BootTimeout
+	if pingTimeout < 2*time.Second {
+		pingTimeout = 2 * time.Second
+	}
+	pingCtx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
 	rawPing, err := w.Call(pingCtx, rpc.MethodPing, nil)
 	if err != nil {

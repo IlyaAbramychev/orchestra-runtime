@@ -42,6 +42,9 @@ llama-metal: llama-prepare
 		-DBUILD_SHARED_LIBS=OFF \
 		-DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF \
+		-DLLAMA_BUILD_TOOLS=OFF \
+		-DLLAMA_BUILD_APP=OFF \
+		-DLLAMA_BUILD_MTMD=ON \
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
 		-DLLAMA_OPENSSL=OFF \
@@ -57,6 +60,9 @@ llama-cuda: llama-prepare
 		-DBUILD_SHARED_LIBS=OFF \
 		-DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF \
+		-DLLAMA_BUILD_TOOLS=OFF \
+		-DLLAMA_BUILD_APP=OFF \
+		-DLLAMA_BUILD_MTMD=ON \
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
 		-DLLAMA_OPENSSL=OFF \
@@ -71,6 +77,9 @@ llama-cpu: llama-prepare
 		-DBUILD_SHARED_LIBS=OFF \
 		-DLLAMA_BUILD_TESTS=OFF \
 		-DLLAMA_BUILD_EXAMPLES=OFF \
+		-DLLAMA_BUILD_TOOLS=OFF \
+		-DLLAMA_BUILD_APP=OFF \
+		-DLLAMA_BUILD_MTMD=ON \
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
 		-DLLAMA_OPENSSL=OFF \
@@ -98,8 +107,8 @@ GGML_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/ggml/include
 COMMON_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/common
 VENDOR_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/vendor
 BASE_CGO = CGO_ENABLED=1 CGO_CFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE)" CGO_CXXFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE) -I$(COMMON_INCLUDE) -I$(VENDOR_INCLUDE)"
-BASE_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -lcommon -lllama -lggml -lstdc++ -lm
-METAL_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lcommon -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
+BASE_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -lllama-common -lllama-common-base -lllama -lggml -lstdc++ -lm
+METAL_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lllama-common -lllama-common-base -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 TEST_LDFLAGS = $(BASE_LDFLAGS)
 ifeq ($(shell uname -s),Darwin)
 TEST_LDFLAGS = $(METAL_LDFLAGS)
@@ -167,6 +176,12 @@ install:
 	cp "$(BUILD_DIR)/$(BINARY)" "$(INSTALL_DIR)/$(BINARY)"
 	cp "$(BUILD_DIR)/$(WORKER_BINARY)" "$(INSTALL_DIR)/$(WORKER_BINARY)"
 	chmod 755 "$(INSTALL_DIR)/$(BINARY)" "$(INSTALL_DIR)/$(WORKER_BINARY)"
+ifeq ($(shell uname -s),Darwin)
+	# Re-sign after copying. macOS can reject linker-signed Go/CGo pages when
+	# the installed file metadata differs from the build artifact.
+	codesign --force --sign - "$(INSTALL_DIR)/$(BINARY)"
+	codesign --force --sign - "$(INSTALL_DIR)/$(WORKER_BINARY)"
+endif
 	@echo "Installed: $(INSTALL_DIR)/$(BINARY) + $(INSTALL_DIR)/$(WORKER_BINARY)"
 
 # --- Submodule ---

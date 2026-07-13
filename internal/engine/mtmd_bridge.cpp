@@ -46,7 +46,25 @@ extern "C" bridge_mtmd_eval_result bridge_mtmd_eval_prompt(
         std::vector<mtmd_bitmap *> bitmaps;
         bitmaps.reserve(n_images);
         for (size_t i = 0; i < n_images; i++) {
-            mtmd_bitmap * bitmap = mtmd_helper_bitmap_init_from_buf(mtmd, image_data[i], image_lens[i]);
+            mtmd_helper_bitmap_wrapper decoded = mtmd_helper_bitmap_init_from_buf(
+                mtmd,
+                image_data[i],
+                image_lens[i],
+                false
+            );
+            mtmd_bitmap * bitmap = decoded.bitmap;
+            if (decoded.video_ctx) {
+                mtmd_helper_video_free(decoded.video_ctx);
+                if (bitmap) {
+                    mtmd_bitmap_free(bitmap);
+                }
+                for (mtmd_bitmap * prev : bitmaps) {
+                    mtmd_bitmap_free(prev);
+                }
+                result.code = 2;
+                result.error = bridge_mtmd_strdup("video input is not supported by Orchestra Runtime");
+                return result;
+            }
             if (!bitmap) {
                 for (mtmd_bitmap * prev : bitmaps) {
                     mtmd_bitmap_free(prev);

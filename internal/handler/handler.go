@@ -48,6 +48,16 @@ func runtimeErrorPayload(err error) map[string]any {
 		payload["maxOutputTokens"] = contextLength.MaxOutputTokens
 		payload["overflowTokens"] = contextLength.OverflowTokens()
 	}
+	var detailed interface {
+		RuntimeErrorDetails() map[string]any
+	}
+	if errors.As(err, &detailed) {
+		for key, value := range detailed.RuntimeErrorDetails() {
+			if key != "code" && key != "message" {
+				payload[key] = value
+			}
+		}
+	}
 	return payload
 }
 
@@ -62,6 +72,12 @@ func runtimeHTTPStatus(err error) int {
 	var contextLength *engine.ContextLengthExceededError
 	if errors.As(err, &contextLength) {
 		return http.StatusBadRequest
+	}
+	var classified interface {
+		HTTPStatus() int
+	}
+	if errors.As(err, &classified) {
+		return classified.HTTPStatus()
 	}
 	if errors.Is(err, context.Canceled) {
 		return 499
@@ -104,6 +120,12 @@ func runtimeErrorCode(err error) string {
 	var contextLength *engine.ContextLengthExceededError
 	if errors.As(err, &contextLength) {
 		return contextLength.Code()
+	}
+	var classified interface {
+		Code() string
+	}
+	if errors.As(err, &classified) {
+		return classified.Code()
 	}
 	if errors.Is(err, context.Canceled) {
 		return "request_cancelled"

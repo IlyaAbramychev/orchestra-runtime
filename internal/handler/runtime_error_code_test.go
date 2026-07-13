@@ -2,9 +2,11 @@ package handler
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
+	"github.com/operium/orchestra-runtime/internal/service"
 )
 
 // TestRuntimeErrorCode verifies that runtimeErrorCode returns the expected code for various error types.
@@ -73,5 +75,23 @@ func TestRuntimeErrorCode(t *testing.T) {
 				t.Fatalf("runtimeErrorCode(%q) = %q; want %q", tt.err.Error(), got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeErrorClassifiesIncompatibleModelArtifact(t *testing.T) {
+	err := &service.IncompatibleModelArtifactError{
+		ModelID:      "gpt-oss-20b",
+		Architecture: "gptoss",
+	}
+
+	if got := runtimeErrorCode(err); got != "model_artifact_incompatible" {
+		t.Fatalf("runtimeErrorCode() = %q", got)
+	}
+	if got := runtimeHTTPStatus(err); got != http.StatusUnprocessableEntity {
+		t.Fatalf("runtimeHTTPStatus() = %d", got)
+	}
+	payload := runtimeErrorPayload(err)
+	if payload["reason"] != "legacy_ollama_gptoss_layout" {
+		t.Fatalf("payload = %#v", payload)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -540,6 +541,61 @@ func TestPullOllamaLibraryModelPersistsManifestMetadata(t *testing.T) {
 	}
 	if !strings.Contains(entry.Modelfile, "SYSTEM") || !strings.Contains(entry.Modelfile, "LICENSE") {
 		t.Fatalf("modelfile = %q", entry.Modelfile)
+	}
+}
+
+func TestPullOllamaLibraryModelRejectsLegacyGPTOSSBeforeWeights(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	manager := NewModelManager(registry, &autoLoadBackend{}, tmp)
+
+	configBlob := []byte(`{"model_format":"gguf","model_family":"gptoss","model_families":["gptoss"],"model_type":"20.9B","file_type":"MXFP4"}`)
+	modelBlob := []byte("legacy provider-specific weights")
+	configDigest := testSHA256Digest(configBlob)
+	modelDigest := testSHA256Digest(modelBlob)
+	var modelRequests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/gpt-oss/manifests/20b":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schemaVersion": 2,
+				"config": map[string]any{
+					"mediaType": "application/vnd.docker.container.image.v1+json",
+					"digest":    configDigest,
+					"size":      len(configBlob),
+				},
+				"layers": []map[string]any{{
+					"mediaType": "application/vnd.ollama.image.model",
+					"digest":    modelDigest,
+					"size":      len(modelBlob),
+				}},
+			})
+		case "/v2/library/gpt-oss/blobs/" + configDigest:
+			_, _ = w.Write(configBlob)
+		case "/v2/library/gpt-oss/blobs/" + modelDigest:
+			modelRequests.Add(1)
+			_, _ = w.Write(modelBlob)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ref := strings.TrimPrefix(server.URL, "http://") + "/library/gpt-oss:20b"
+	_, err = manager.PullOllamaLibraryModel(context.Background(), ref, true, nil)
+	var incompatible *IncompatibleModelArtifactError
+	if !errors.As(err, &incompatible) {
+		t.Fatalf("pull error = %v; want IncompatibleModelArtifactError", err)
+	}
+	if got := modelRequests.Load(); got != 0 {
+		t.Fatalf("model blob requests = %d; want 0", got)
+	}
+	if got := len(registry.List()); got != 0 {
+		t.Fatalf("registry entries = %d; want 0", got)
 	}
 }
 

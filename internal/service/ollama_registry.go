@@ -66,6 +66,14 @@ type ollamaLayer struct {
 	From      string `json:"from,omitempty"`
 }
 
+type ollamaModelConfig struct {
+	ModelFormat   string   `json:"model_format"`
+	ModelFamily   string   `json:"model_family"`
+	ModelFamilies []string `json:"model_families"`
+	ModelType     string   `json:"model_type"`
+	FileType      string   `json:"file_type"`
+}
+
 // PullOllamaLibraryModel pulls an Ollama registry model by name. It implements
 // the registry manifest/blob path used by Ollama while registering the resolved
 // GGUF model layer in Orchestra's local model registry.
@@ -87,6 +95,9 @@ func (m *ModelManager) PullOllamaLibraryModel(
 	m.pullMu.Lock()
 	if existing := m.findExistingOllamaPull(parsed.Name); existing != nil {
 		m.pullMu.Unlock()
+		if err := validateModelArtifact(existing); err != nil {
+			return "", err
+		}
 		progress(OllamaPullProgress{Status: "success"})
 		return existing.ID, nil
 	}
@@ -119,25 +130,48 @@ func (m *ModelManager) PullOllamaLibraryModel(
 		return "", state.err
 	}
 
+	// Ollama's config blob is small and identifies the model family. Inspect it
+	// before downloading multi-gigabyte weights so known provider-specific GGUF
+	// variants fail immediately instead of wasting bandwidth and disk space.
+	layerPaths := make(map[string]string, len(manifest.Layers)+1)
+	if manifest.Config.Digest != "" {
+		configPath, err := m.downloadOllamaBlob(ctx, parsed, manifest.Config, state.emit)
+		if err != nil {
+			state.err = fmt.Errorf("pull model config: %w", err)
+			return "", state.err
+		}
+		if err := verifyDigestFile(manifest.Config.Digest, configPath); err != nil {
+			state.err = err
+			return "", err
+		}
+		layerPaths[manifest.Config.Digest] = configPath
+		if err := validateOllamaModelConfig(configPath, parsed.Name); err != nil {
+			state.err = err
+			return "", err
+		}
+	}
+
 	layers := append([]ollamaLayer(nil), manifest.Layers...)
 	if manifest.Config.Digest != "" {
 		layers = append(layers, manifest.Config)
 	}
 
 	var modelLayer *ollamaLayer
-	layerPaths := make(map[string]string, len(layers))
 	for i := range layers {
 		layer := layers[i]
+		if layer.MediaType == "application/vnd.ollama.image.model" {
+			copyLayer := layer
+			modelLayer = &copyLayer
+		}
+		if _, downloaded := layerPaths[layer.Digest]; downloaded {
+			continue
+		}
 		path, err := m.downloadOllamaBlob(ctx, parsed, layer, state.emit)
 		if err != nil {
 			state.err = err
 			return "", err
 		}
 		layerPaths[layer.Digest] = path
-		if layer.MediaType == "application/vnd.ollama.image.model" {
-			copyLayer := layer
-			modelLayer = &copyLayer
-		}
 	}
 	if modelLayer == nil {
 		state.err = fmt.Errorf("manifest does not contain a GGUF model layer")
@@ -168,6 +202,30 @@ func (m *ModelManager) PullOllamaLibraryModel(
 	state.emit(OllamaPullProgress{Status: "writing manifest"})
 	state.emit(OllamaPullProgress{Status: "success"})
 	return entry.ID, nil
+}
+
+func validateOllamaModelConfig(path, modelID string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open Ollama model config: %w", err)
+	}
+	defer file.Close()
+
+	var config ollamaModelConfig
+	if err := json.NewDecoder(io.LimitReader(file, 1024*1024)).Decode(&config); err != nil {
+		return fmt.Errorf("decode Ollama model config: %w", err)
+	}
+	families := append([]string{config.ModelFamily}, config.ModelFamilies...)
+	for _, family := range families {
+		if strings.EqualFold(strings.TrimSpace(family), legacyOllamaGPTOSSArch) {
+			return &IncompatibleModelArtifactError{
+				ModelID:      modelID,
+				Architecture: strings.TrimSpace(family),
+				ModelType:    config.ModelType,
+			}
+		}
+	}
+	return nil
 }
 
 func (s *ollamaPullState) subscribe(fn func(OllamaPullProgress)) {

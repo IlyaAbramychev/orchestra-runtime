@@ -181,6 +181,10 @@ func cloneModelEntry(entry *storage.ModelEntry) *storage.ModelEntry {
 	}
 	copy := *entry
 	normalizeModelMetadata(&copy)
+	if err := validateModelArtifact(&copy); err != nil {
+		copy.Status = "error"
+		copy.ErrorMessage = err.Error()
+	}
 	return &copy
 }
 
@@ -951,6 +955,9 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 	}
 	if entry.Status != "ready" && entry.Status != "loaded" {
 		return fmt.Errorf("model %s is not ready (status: %s)", id, entry.Status)
+	}
+	if err := validateModelArtifact(entry); err != nil {
+		return err
 	}
 	var err error
 	opts, err = m.resolveModelLoadOptions(entry, opts)
