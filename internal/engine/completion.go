@@ -897,7 +897,10 @@ func parseThinkContent(content string, partial bool) (string, string) {
 	for {
 		start := strings.Index(remaining, "<think>")
 		if start < 0 {
-			segment := withoutPartialThinkStart(remaining)
+			segment := remaining
+			if partial {
+				segment = withoutPartialThinkStart(segment)
+			}
 			if foundThink && visible.Len() == 0 {
 				segment = strings.TrimLeft(segment, " \t\r\n")
 			}

@@ -241,6 +241,38 @@ func TestContentOnlyPartialParserNeverStreamsOpenThinkTags(t *testing.T) {
 	}
 }
 
+func TestContentOnlyFinalParserPreservesLiteralMarkerPrefixes(t *testing.T) {
+	render := &NativeChatRender{}
+	for _, raw := range []string{"<", "operator: <", "prefix <thi"} {
+		t.Run(raw, func(t *testing.T) {
+			sent := ""
+			for i := 1; i <= len(raw); i++ {
+				messageJSON, err := ParseNativeChatPartial(raw[:i], render)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var parsed nativeParsedMessage
+				if err := json.Unmarshal(messageJSON, &parsed); err != nil {
+					t.Fatal(err)
+				}
+				content, reasoning := splitReasoningContentPartial(parsed.Content)
+				if reasoning != "" || !strings.HasPrefix(content, sent) {
+					t.Fatalf("byte %d: content=%q reasoning=%q sent=%q", i, content, reasoning, sent)
+				}
+				sent = content
+			}
+			result := &CompletionResult{Text: raw, FinishReason: "stop"}
+			(&Engine{}).applyNativeResult(result, raw, render, false)
+			if result.Text != raw || result.Reasoning != "" || !strings.HasPrefix(result.Text, sent) {
+				t.Fatalf("final=%+v sent=%q", result, sent)
+			}
+			if got := sent + result.Text[len(sent):]; got != raw {
+				t.Fatalf("stream reconstruction=%q want=%q", got, raw)
+			}
+		})
+	}
+}
+
 func TestUnclosedThinkTagStaysOutOfContent(t *testing.T) {
 	content, reasoning := splitReasoningContent("<think>private reasoning")
 	if content != "" || reasoning != "private reasoning" {
