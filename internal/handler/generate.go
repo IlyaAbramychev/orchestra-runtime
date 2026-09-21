@@ -332,7 +332,10 @@ func (h *GenerateHandler) handleBufferedStream(
 		return
 	}
 
-	content, thinking := applyThinkingOutput(req.Think, text)
+	content, thinking := text, final.Reasoning
+	if thinking == "" {
+		content, thinking = applyThinkingOutput(req.Think, text)
+	}
 	if err := validateStructuredOutput(req.Format, content); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		h.inference.ApplyKeepAlive(req.KeepAlive)

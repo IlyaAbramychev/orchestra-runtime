@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -196,6 +197,54 @@ func TestNativePartialParserExposesIncrementalPlainContent(t *testing.T) {
 		if err := json.Unmarshal(encoded, &parsed); err != nil || parsed.Content != prefix {
 			t.Fatalf("partial parse %q = %+v, %v", prefix, parsed, err)
 		}
+	}
+}
+
+func TestContentOnlyPartialParserNeverStreamsOpenThinkTags(t *testing.T) {
+	render := &NativeChatRender{} // llama.cpp content-only parser
+	for _, tc := range []struct{ raw, visible, reasoning string }{
+		{"<think>private reasoning</think>Visible answer", "Visible answer", "private reasoning"},
+		{"<think>private reasoning</think>\nVisible answer", "Visible answer", "private reasoning"},
+		{"Before <think>private reasoning</think> After", "Before  After", "private reasoning"},
+		{"  Before <think>private reasoning</think> After", "  Before  After", "private reasoning"},
+		{"<think>private</think>Visible <think> reasoning</think> answer", "Visible  answer", "private reasoning"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			var sentContent, sentReasoning string
+			for i := 1; i <= len(tc.raw); i++ {
+				messageJSON, err := ParseNativeChatPartial(tc.raw[:i], render)
+				if err != nil {
+					t.Fatalf("byte %d: %v", i, err)
+				}
+				var parsed nativeParsedMessage
+				if err := json.Unmarshal(messageJSON, &parsed); err != nil {
+					t.Fatalf("byte %d: %v", i, err)
+				}
+				content, reasoning := splitReasoningContentPartial(parsed.Content)
+				if !strings.HasPrefix(content, sentContent) || !strings.HasPrefix(reasoning, sentReasoning) {
+					t.Fatalf("byte %d changed emitted prefix: content=%q prior=%q reasoning=%q prior=%q", i, content, sentContent, reasoning, sentReasoning)
+				}
+				sentContent, sentReasoning = content, reasoning
+				if strings.Contains(sentContent, "<think") || strings.Contains(sentContent, "private") || strings.Contains(sentContent, "</think") {
+					t.Fatalf("byte %d leaked reasoning into content: %q", i, sentContent)
+				}
+			}
+			result := &CompletionResult{Text: tc.raw, FinishReason: "stop"}
+			(&Engine{}).applyNativeResult(result, tc.raw, render, false)
+			if !strings.HasPrefix(result.Text, sentContent) || !strings.HasPrefix(result.Reasoning, sentReasoning) {
+				t.Fatalf("final parse changed emitted prefix: result=%+v content=%q reasoning=%q", result, sentContent, sentReasoning)
+			}
+			if result.Text != tc.visible || result.Reasoning != tc.reasoning {
+				t.Fatalf("final split mismatch: %+v", result)
+			}
+		})
+	}
+}
+
+func TestUnclosedThinkTagStaysOutOfContent(t *testing.T) {
+	content, reasoning := splitReasoningContent("<think>private reasoning")
+	if content != "" || reasoning != "private reasoning" {
+		t.Fatalf("content=%q reasoning=%q", content, reasoning)
 	}
 }
 

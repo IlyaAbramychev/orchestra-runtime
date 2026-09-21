@@ -433,7 +433,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 						var parsed nativeParsedMessage
 						if json.Unmarshal(messageJSON, &parsed) == nil && len(parsed.ToolCalls) == 0 {
 							if parsed.ReasoningContent == "" {
-								parsed.Content, parsed.ReasoningContent = splitReasoningContent(parsed.Content)
+								parsed.Content, parsed.ReasoningContent = splitReasoningContentPartial(parsed.Content)
 							}
 							emitParsed(parsed.Content, parsed.ReasoningContent)
 						}
@@ -880,14 +880,60 @@ func (e *Engine) applyNativeResult(result *CompletionResult, raw string, render 
 }
 
 func splitReasoningContent(content string) (string, string) {
-	start := strings.Index(content, "<think>")
-	end := strings.Index(content, "</think>")
-	if start < 0 || end < start {
-		return content, ""
+	return parseThinkContent(content, false)
+}
+
+// splitReasoningContentPartial exposes only a stable visible prefix. The
+// content-only llama parser treats an unfinished <think> tag as plain content;
+// publishing it would leak reasoning and prevent final deltas from matching.
+func splitReasoningContentPartial(content string) (visible, reasoning string) {
+	return parseThinkContent(content, true)
+}
+
+func parseThinkContent(content string, partial bool) (string, string) {
+	var visible, reasoning strings.Builder
+	remaining := content
+	foundThink := false
+	for {
+		start := strings.Index(remaining, "<think>")
+		if start < 0 {
+			segment := withoutPartialThinkStart(remaining)
+			if foundThink && visible.Len() == 0 {
+				segment = strings.TrimLeft(segment, " \t\r\n")
+			}
+			visible.WriteString(segment)
+			break
+		}
+		foundThink = true
+		visible.WriteString(remaining[:start])
+		remaining = remaining[start+len("<think>"):]
+		end := strings.Index(remaining, "</think>")
+		if end < 0 {
+			// A partial parser can mistake open reasoning for content. Hold it
+			// until the closing tag; at EOF it remains reasoning, never content.
+			if !partial {
+				reasoning.WriteString(remaining)
+			}
+			break
+		}
+		reasoning.WriteString(remaining[:end])
+		remaining = remaining[end+len("</think>"):]
 	}
-	reasoning := strings.TrimSpace(content[start+len("<think>") : end])
-	visible := strings.TrimSpace(content[:start] + content[end+len("</think>"):])
-	return visible, reasoning
+	visibleText := visible.String()
+	if partial {
+		visibleText = strings.TrimRight(visibleText, " \t\r\n")
+	}
+	return visibleText, strings.TrimSpace(reasoning.String())
+}
+
+func withoutPartialThinkStart(content string) string {
+	const marker = "<think>"
+	for n := len(marker) - 1; n > 0; n-- {
+		if strings.HasSuffix(content, marker[:n]) {
+			return content[:len(content)-n]
+		}
+	}
+	return content
 }
 
 func looksLikeToolProtocol(raw string) bool {

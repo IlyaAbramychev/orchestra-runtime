@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/operium/orchestra-runtime/internal/engine"
@@ -270,6 +271,35 @@ func TestGenerateThinkStreamsBuffered(t *testing.T) {
 	chunks := decodeGenerateStream(t, rec.Body.Bytes())
 	if len(chunks) != 3 || chunks[0].Thinking != "reasoning trace" || chunks[1].Response != "final answer" || !chunks[2].Done {
 		t.Fatalf("unexpected chunks: %+v", chunks)
+	}
+}
+
+func TestGenerateBufferedStreamKeepsIntermediateReasoning(t *testing.T) {
+	for _, option := range []string{`,"think":true`, `,"format":"json"`} {
+		t.Run(option, func(t *testing.T) {
+			h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{
+				streamChunks: []engine.CompletionChunk{
+					{Reasoning: "reasoning-prefix"},
+					{Text: `{}`},
+					{Done: true, Reasoning: "-suffix", FinishReason: "stop"},
+				},
+			}, 1))
+			body := `{"model":"test","prompt":"hi","stream":true` + option + `}`
+			rec := httptest.NewRecorder()
+			h.Generate(rec, httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			chunks := decodeGenerateStream(t, rec.Body.Bytes())
+			var content, reasoning strings.Builder
+			for _, chunk := range chunks {
+				content.WriteString(chunk.Response)
+				reasoning.WriteString(chunk.Thinking)
+			}
+			if content.String() != `{}` || reasoning.String() != "reasoning-prefix-suffix" {
+				t.Fatalf("content=%q reasoning=%q chunks=%+v", content.String(), reasoning.String(), chunks)
+			}
+		})
 	}
 }
 

@@ -918,6 +918,39 @@ func TestChatStreamsFinalNativeDeltasOnceWithoutTools(t *testing.T) {
 	})
 }
 
+func TestOllamaBufferedChatKeepsIntermediateReasoning(t *testing.T) {
+	for _, tc := range []struct {
+		name, option, content string
+	}{
+		{"think", `,"think":true`, "visible answer"},
+		{"json", `,"format":"json"`, `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &fakeChatBackend{streamChunks: []engine.CompletionChunk{
+				{Reasoning: "reasoning-prefix"},
+				{Text: tc.content},
+				{Done: true, Reasoning: "-suffix", FinishReason: "stop"},
+			}}
+			h := NewChatHandler(service.NewInferenceService(backend, 1))
+			body := fmt.Sprintf(`{"model":"test","stream":true,"messages":[{"role":"user","content":"hi"}]%s}`, tc.option)
+			rec := httptest.NewRecorder()
+			h.ChatOllama(rec, httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewBufferString(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
+			var content, reasoning strings.Builder
+			for _, chunk := range chunks {
+				content.WriteString(chunk.Message.Content)
+				reasoning.WriteString(chunk.Message.Thinking)
+			}
+			if content.String() != tc.content || reasoning.String() != "reasoning-prefix-suffix" {
+				t.Fatalf("content=%q reasoning=%q chunks=%+v", content.String(), reasoning.String(), chunks)
+			}
+		})
+	}
+}
+
 func TestOllamaChatKeepsContentAndThinkingWithNativeToolCalls(t *testing.T) {
 	progress := `<operium-progress>{"tasks":[{"id":"1","title":"Plan","status":"in_progress"}]}</operium-progress>`
 	backend := &fakeChatBackend{completeResult: &engine.CompletionResult{

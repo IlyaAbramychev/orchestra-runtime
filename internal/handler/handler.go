@@ -348,22 +348,25 @@ number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1
 
 ws ::= | " " | "\n" [ \t]{0,20}`
 
+// collectCompletionStream preserves both channels across incremental chunks.
+// The returned final chunk carries the complete reasoning alongside metadata.
 func collectCompletionStream(ch <-chan engine.CompletionChunk) (string, engine.CompletionChunk, error) {
 	var text strings.Builder
+	var reasoning strings.Builder
 	var final engine.CompletionChunk
 	for chunk := range ch {
 		if chunk.Err != nil {
 			return "", engine.CompletionChunk{}, chunk.Err
 		}
+		text.WriteString(chunk.Text)
+		reasoning.WriteString(chunk.Reasoning)
 		if chunk.Done {
 			final = chunk
-			if chunk.Text != "" {
-				text.WriteString(chunk.Text)
-			}
+			final.Reasoning = reasoning.String()
 			return text.String(), final, nil
 		}
-		text.WriteString(chunk.Text)
 	}
+	final.Reasoning = reasoning.String()
 	return text.String(), final, nil
 }
 
