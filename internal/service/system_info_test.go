@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,5 +129,82 @@ func TestSystemInfoUsesActiveSchedulerModelDuringLoad(t *testing.T) {
 	close(backend.loadBlock)
 	if err := <-done; err != nil {
 		t.Fatalf("load failed: %v", err)
+	}
+}
+
+// startingBackend is an idle backend whose native init has not finished.
+type startingBackend struct {
+	*autoLoadBackend
+	ready bool
+}
+
+func (b *startingBackend) State() string      { return engine.StateIdle }
+func (b *startingBackend) BackendReady() bool { return b.ready }
+
+func TestSystemInfoReportsStartingUntilBackendReady(t *testing.T) {
+	backend := &startingBackend{autoLoadBackend: &autoLoadBackend{}}
+	sysInfo := NewSystemInfo(backend)
+
+	if got := sysInfo.BackendState(); got != BackendStarting {
+		t.Fatalf("backend state = %q, want %q", got, BackendStarting)
+	}
+	if got := sysInfo.GetInfo(0).EngineState; got != BackendStarting {
+		t.Fatalf("engine_state = %q, want %q", got, BackendStarting)
+	}
+	if got := sysInfo.GetStatus().State; got != BackendStarting {
+		t.Fatalf("status state = %q, want %q", got, BackendStarting)
+	}
+
+	backend.ready = true
+	if got := sysInfo.BackendState(); got != engine.StateReady {
+		t.Fatalf("backend state = %q, want %q", got, engine.StateReady)
+	}
+	if got := sysInfo.GetInfo(0).EngineState; got != engine.StateIdle {
+		t.Fatalf("engine_state = %q, want %q", got, engine.StateIdle)
+	}
+}
+
+func TestSystemInfoServesStaleHardwareWhileRefreshing(t *testing.T) {
+	sysInfo := NewSystemInfo(&autoLoadBackend{})
+	sysInfo.hwMaxAge = time.Millisecond
+	var calls int32
+	release := make(chan struct{})
+	sysInfo.sampleHW = func() hwSample {
+		n := atomic.AddInt32(&calls, 1)
+		if n > 1 {
+			<-release
+		}
+		return hwSample{totalRAM: int64(n), availableRAM: int64(n), sampledAt: time.Now()}
+	}
+
+	if info := sysInfo.GetInfo(0); info.TotalRAM != 1 {
+		t.Fatalf("first request must sample synchronously, got total=%d", info.TotalRAM)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	start := time.Now()
+	info := sysInfo.GetInfo(0)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("stale hardware sample blocked the request for %s", elapsed)
+	}
+	if info.TotalRAM != 1 {
+		t.Fatalf("expected the stale sample while refreshing, got total=%d", info.TotalRAM)
+	}
+	// A second stale read must not start another refresh.
+	_ = sysInfo.GetInfo(0)
+
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if sysInfo.GetInfo(0).TotalRAM == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := sysInfo.GetInfo(0).TotalRAM; got < 2 {
+		t.Fatalf("background refresh did not publish, total=%d", got)
+	}
+	if got := atomic.LoadInt32(&calls); got > 3 {
+		t.Fatalf("refresh started %d times, want at most one per expiry", got)
 	}
 }

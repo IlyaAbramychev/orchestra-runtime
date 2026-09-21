@@ -669,3 +669,76 @@ func TestInferenceRejectsUnsupportedToolAndThinkingRequestsBeforeLoad(t *testing
 		t.Fatalf("unsupported requests loaded the model %d times", backend.loads)
 	}
 }
+
+func TestPerRequestNumCtxReloadsModel(t *testing.T) {
+	tmp := t.TempDir()
+	registry, err := storage.NewModelRegistry(tmp)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	modelPath := filepath.Join(tmp, "qwen3.gguf")
+	if err := os.WriteFile(modelPath, []byte("model"), 0644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := registry.Add(&storage.ModelEntry{
+		ID: "model-1", Name: "qwen3", Filename: "qwen3.gguf", Status: "ready", FilePath: modelPath,
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	backend := &autoLoadBackend{}
+	scheduler := NewRuntimeScheduler(backend, 1)
+	manager := NewModelManagerWithScheduler(registry, scheduler, tmp)
+	manager.SetDefaultLoadOptions(engine.LoadOptions{GPULayers: -1, CtxSize: 8192, Threads: 4, BatchSize: 512, UseMmap: true})
+	inference := NewInferenceServiceWithScheduler(scheduler)
+	inference.SetModelLoader(manager)
+
+	ctxReq := func(numCtx, numGPU *int) *model.ChatCompletionRequest {
+		return &model.ChatCompletionRequest{
+			Model:    "qwen3",
+			Messages: []model.ChatMessage{{Role: "user", Content: "hi"}},
+			NumCtx:   numCtx, NumGPU: numGPU,
+		}
+	}
+	n := func(i int) *int { return &i }
+
+	// 1) plain autoload → default ctx, one load.
+	if _, err := inference.Complete(context.Background(), ctxReq(nil, nil)); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if backend.loads != 1 || backend.lastOpts.CtxSize != 8192 {
+		t.Fatalf("initial load wrong: loads=%d ctx=%d", backend.loads, backend.lastOpts.CtxSize)
+	}
+
+	// 2) different num_ctx → reload with that ctx (explicit).
+	if _, err := inference.Complete(context.Background(), ctxReq(n(4096), nil)); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if backend.loads != 2 || backend.lastOpts.CtxSize != 4096 || !backend.lastOpts.CtxSizeExplicit {
+		t.Fatalf("expected reload to ctx 4096 explicit: loads=%d opts=%+v", backend.loads, backend.lastOpts)
+	}
+
+	// 3) same num_ctx again → no reload.
+	if _, err := inference.Complete(context.Background(), ctxReq(n(4096), nil)); err != nil {
+		t.Fatalf("same ctx: %v", err)
+	}
+	if backend.loads != 2 {
+		t.Fatalf("expected no reload for same num_ctx, loads=%d", backend.loads)
+	}
+
+	// 4) plain request (no override) → reuse whatever is loaded, no reload.
+	if _, err := inference.Complete(context.Background(), ctxReq(nil, nil)); err != nil {
+		t.Fatalf("plain reuse: %v", err)
+	}
+	if backend.loads != 2 {
+		t.Fatalf("expected no reload for plain request, loads=%d", backend.loads)
+	}
+
+	// 5) different num_gpu → reload.
+	if _, err := inference.Complete(context.Background(), ctxReq(n(4096), n(0))); err != nil {
+		t.Fatalf("gpu reload: %v", err)
+	}
+	if backend.loads != 3 || backend.lastOpts.GPULayers != 0 {
+		t.Fatalf("expected reload for num_gpu change: loads=%d gpu=%d", backend.loads, backend.lastOpts.GPULayers)
+	}
+}

@@ -21,11 +21,18 @@ func (h *SystemHandler) SetInference(inference *service.InferenceService) {
 	h.inference = inference
 }
 
-// Health handles GET /health.
+// Health handles GET /health. It is the liveness probe: it answers as soon as
+// the listener is open and never waits on the engine. "backend" is "starting"
+// while llama.cpp initializes and "ready" afterwards.
 func (h *SystemHandler) Health(w http.ResponseWriter, r *http.Request) {
+	backend := "ready"
+	if h.sysInfo != nil {
+		backend = h.sysInfo.BackendState()
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"service": "orchestra-runtime",
+		"backend": backend,
 	})
 }
 

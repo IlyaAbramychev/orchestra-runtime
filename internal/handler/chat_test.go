@@ -20,6 +20,7 @@ import (
 type fakeChatBackend struct {
 	notLoaded        bool
 	completeText     string
+	completeResult   *engine.CompletionResult
 	completeErr      error
 	streamErr        error
 	streamChunks     []engine.CompletionChunk
@@ -49,6 +50,10 @@ func (f *fakeChatBackend) Complete(_ context.Context, messages []engine.ChatMess
 	}
 	if f.block != nil {
 		<-f.block
+	}
+	if f.completeResult != nil {
+		result := *f.completeResult
+		return &result, nil
 	}
 	text := f.completeText
 	if text == "" {
@@ -743,4 +748,175 @@ func decodeOllamaChatStream(t *testing.T, body []byte) []model.OllamaChatRespons
 		t.Fatalf("scan stream: %v", err)
 	}
 	return chunks
+}
+
+func TestOperiumProgressFieldParses(t *testing.T) {
+	var req model.ChatCompletionRequest
+	body := []byte(`{"model":"m","operium_progress":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !req.OperiumProgress {
+		t.Fatal("expected OperiumProgress to be true")
+	}
+}
+
+func TestOperiumProgressInstructionMergesIntoSystem(t *testing.T) {
+	msgs := []model.ChatMessage{
+		{Role: "system", Content: "Ты — ассистент."},
+		{Role: "user", Content: "hi"},
+	}
+	out := withStructuredInstruction(msgs, operiumProgressInstruction)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(out))
+	}
+	if !strings.Contains(out[0].Content, "Ты — ассистент.") || !strings.Contains(out[0].Content, "operium-progress") {
+		t.Fatalf("system message missing instruction: %q", out[0].Content)
+	}
+	// no system message -> instruction is prepended as a new system message
+	out = withStructuredInstruction([]model.ChatMessage{{Role: "user", Content: "hi"}}, operiumProgressInstruction)
+	if len(out) != 2 || out[0].Role != "system" || !strings.Contains(out[0].Content, "operium-progress") {
+		t.Fatalf("expected prepended system instruction, got %+v", out)
+	}
+}
+
+func TestOpenAIChatKeepsContentAndReasoningWithNativeToolCalls(t *testing.T) {
+	progress := `<operium-progress>{"tasks":[{"id":"1","title":"Plan","status":"in_progress"}]}</operium-progress>`
+	backend := &fakeChatBackend{completeResult: &engine.CompletionResult{
+		Text:         progress,
+		Reasoning:    "need to read the file first",
+		ToolCalls:    []engine.ToolCall{{ID: "call_1", Name: "read_file", Arguments: json.RawMessage(`{"path":"README.md"}`)}},
+		FinishReason: "tool_calls",
+	}}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"tools":[{"type":"function","function":{"name":"read_file"}}],
+		"messages":[{"role":"user","content":"read README"}]
+	}`)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OpenAIChatCompletionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	message := resp.Choices[0].Message
+	if message == nil || len(message.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %+v", message)
+	}
+	if message.Content == nil || *message.Content != progress {
+		t.Fatalf("content next to tool calls was dropped: %+v", message)
+	}
+	if message.ReasoningContent != "need to read the file first" {
+		t.Fatalf("reasoning next to tool calls was dropped: %+v", message)
+	}
+}
+
+func TestOpenAIChatStreamKeepsContentAndReasoningWithNativeToolCalls(t *testing.T) {
+	progress := `<operium-progress>{"tasks":[{"id":"1","title":"Plan","status":"in_progress"}]}</operium-progress>`
+	backend := &fakeChatBackend{streamChunks: []engine.CompletionChunk{{
+		Done:         true,
+		FinishReason: "tool_calls",
+		Text:         progress,
+		Reasoning:    "need to read the file first",
+		ToolCalls:    []engine.ToolCall{{ID: "call_1", Name: "read_file", Arguments: json.RawMessage(`{"path":"README.md"}`)}},
+	}}}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{
+		"model":"test",
+		"stream":true,
+		"tools":[{"type":"function","function":{"name":"read_file"}}],
+		"messages":[{"role":"user","content":"read README"}]
+	}`)
+	rec := httptest.NewRecorder()
+
+	h.ChatCompletion(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	dataLines := openAISSEDataLines(t, rec.Body.String())
+	if len(dataLines) != 5 || dataLines[4] != "[DONE]" {
+		t.Fatalf("expected reasoning, content, tool_calls, final and [DONE], got %#v", dataLines)
+	}
+	chunks := make([]model.OpenAIChatCompletionChunk, 4)
+	for i := range chunks {
+		if err := json.Unmarshal([]byte(dataLines[i]), &chunks[i]); err != nil {
+			t.Fatalf("decode chunk %d: %v", i, err)
+		}
+	}
+	if chunks[0].Choices[0].Delta.ReasoningContent != "need to read the file first" {
+		t.Fatalf("first chunk should carry reasoning: %s", dataLines[0])
+	}
+	if content := chunks[1].Choices[0].Delta.Content; content == nil || *content != progress {
+		t.Fatalf("second chunk should carry the visible content: %s", dataLines[1])
+	}
+	if calls := chunks[2].Choices[0].Delta.ToolCalls; len(calls) != 1 || calls[0].Function.Name != "read_file" {
+		t.Fatalf("third chunk should carry the tool call: %s", dataLines[2])
+	}
+	if reason := chunks[3].Choices[0].FinishReason; reason == nil || *reason != "tool_calls" {
+		t.Fatalf("final chunk should finish with tool_calls: %s", dataLines[3])
+	}
+}
+
+func TestOllamaChatKeepsContentAndThinkingWithNativeToolCalls(t *testing.T) {
+	progress := `<operium-progress>{"tasks":[{"id":"1","title":"Plan","status":"in_progress"}]}</operium-progress>`
+	backend := &fakeChatBackend{completeResult: &engine.CompletionResult{
+		Text:         progress,
+		Reasoning:    "check the weather first",
+		ToolCalls:    []engine.ToolCall{{ID: "call_1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"Paris"}`)}},
+		FinishReason: "tool_calls",
+	}}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	body := bytes.NewBufferString(`{"model":"test","stream":false,"tools":[{"type":"function","function":{"name":"get_weather"}}],"messages":[{"role":"user","content":"weather"}]}`)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, httptest.NewRequest(http.MethodPost, "/api/chat", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp model.OllamaChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.Content != progress || resp.Message.Thinking != "check the weather first" {
+		t.Fatalf("content or thinking dropped next to tool calls: %+v", resp.Message)
+	}
+}
+
+func TestOllamaChatBufferedStreamKeepsContentAndThinkingWithNativeToolCalls(t *testing.T) {
+	progress := `<operium-progress>{"tasks":[{"id":"1","title":"Plan","status":"in_progress"}]}</operium-progress>`
+	h := NewChatHandler(service.NewInferenceService(&fakeChatBackend{
+		streamChunks: []engine.CompletionChunk{{
+			Done:         true,
+			FinishReason: "tool_calls",
+			Text:         progress,
+			Reasoning:    "check the weather first",
+			ToolCalls:    []engine.ToolCall{{ID: "call_1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"Paris"}`)}},
+		}},
+	}, 1))
+	body := bytes.NewBufferString(`{"model":"test","tools":[{"type":"function","function":{"name":"get_weather"}}],"messages":[{"role":"user","content":"weather"}]}`)
+	rec := httptest.NewRecorder()
+
+	h.ChatOllama(rec, httptest.NewRequest(http.MethodPost, "/api/chat", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeOllamaChatStream(t, rec.Body.Bytes())
+	if len(chunks) != 4 {
+		t.Fatalf("expected thinking, content, tool_calls and done chunks, got %+v", chunks)
+	}
+	if chunks[0].Message.Thinking != "check the weather first" ||
+		chunks[1].Message.Content != progress ||
+		len(chunks[2].Message.ToolCalls) != 1 ||
+		!chunks[3].Done {
+		t.Fatalf("unexpected chunk order: %+v", chunks)
+	}
 }

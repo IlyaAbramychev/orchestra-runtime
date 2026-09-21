@@ -149,6 +149,22 @@ sampling и tools, выполняет chat/tools/thinking/vision сценари�
 сырые ответы вместе с `report.json`. Ollama и Orchestra запускаются отдельными
 фазами, поэтому две копии VLM не конкурируют за unified memory.
 
+### Проверка живости
+
+```bash
+curl :8100/health
+```
+
+```jsonc
+{"status": "ok", "service": "orchestra-runtime", "backend": "starting"}
+```
+
+Эндпоинт отвечает сразу после открытия порта и никогда не ждёт движок, поэтому
+его стоит использовать для liveness-проб клиента. `backend` равен `starting`,
+пока llama.cpp инициализирует Metal/CUDA (на холодном старте — секунды), и
+`ready` после этого. Запрос на загрузку модели, пришедший во время
+инициализации, дождётся её, а не упадёт.
+
 ### Состояние сервера
 
 ```bash
@@ -157,7 +173,7 @@ curl :8100/api/system
 
 ```jsonc
 {
-  "engine_state": "ready",   // "ready" / "loading" / "busy"
+  "engine_state": "ready",   // "starting" / "idle" / "loading" / "generating" / "unloading" / "ready"
   "current_model": "qwen2.5-coder-7b-q4",
   "backend": "metal",
   "memory_used_mb": 4823

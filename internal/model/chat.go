@@ -23,6 +23,11 @@ type ChatCompletionRequest struct {
 	Temperature      *float64 `json:"temperature,omitempty"`
 	MaxTokens        *int     `json:"max_tokens,omitempty"`
 	NumPredict       *int     `json:"num_predict,omitempty"` // Ollama alias for max_tokens
+	// NumCtx / NumGPU are load-time overrides (Ollama parity): a differing value
+	// reloads the model with that context window / GPU-layer count. On the
+	// OpenAI-compatible surface these are Orchestra extension fields.
+	NumCtx *int `json:"num_ctx,omitempty"`
+	NumGPU *int `json:"num_gpu,omitempty"`
 	TopP             *float64 `json:"top_p,omitempty"`
 	TopK             *int     `json:"top_k,omitempty"`
 	MinP             *float64 `json:"min_p,omitempty"`
@@ -41,6 +46,13 @@ type ChatCompletionRequest struct {
 	// *after* the request completes. Accepts a number of seconds (0 = unload
 	// immediately, negative = keep forever). Matches Ollama's spelling.
 	KeepAlive *int64 `json:"keep_alive,omitempty"`
+
+	// OperiumProgress opts the request into the Operium progress protocol:
+	// the server appends a system instruction teaching the model to report
+	// task progress via <operium-progress> JSON blocks. Used by Operium
+	// Desktop; unknown to other OpenAI-compatible servers, so clients must
+	// only send it to this runtime.
+	OperiumProgress bool `json:"operium_progress,omitempty"`
 
 	// Grammar is an internal transport field for Ollama structured output.
 	// It is not part of the OpenAI-compatible request JSON.

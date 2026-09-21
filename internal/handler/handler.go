@@ -434,6 +434,19 @@ func withStructuredInstruction(messages []model.ChatMessage, instruction string)
 	return append([]model.ChatMessage{{Role: "system", Content: instruction}}, out...)
 }
 
+// operiumProgressInstruction teaches the model the Operium progress protocol.
+// The model reports multi-step task progress as a machine-readable block that
+// Operium Desktop strips from the visible reply and renders in its Progress
+// panel. Kept deliberately short: local models have small context windows.
+const operiumProgressInstruction = `[Operium Progress Protocol] Если задача многошаговая (план, реализация, проверка), сопровождай работу машиночитаемым блоком прогресса:
+<operium-progress>{"tasks":[{"id":"1","title":"Краткое название шага","status":"pending"}]}</operium-progress>
+Правила:
+- status каждой задачи: "pending" (в очереди), "in_progress" (выполняется) или "done" (готово).
+- Выведи блок сразу после того, как составил план, и обновляй его по мере выполнения шагов, меняя статусы.
+- Когда все шаги завершены, выведи финальный блок, где у всех задач status "done".
+- Блок не является частью ответа пользователю: не упоминай его, не описывай и не оборачивай в markdown-код.
+- Для простых вопросов без шагов блок не нужен.`
+
 func appendInstruction(existing, instruction string) string {
 	existing = strings.TrimSpace(existing)
 	if existing == "" {

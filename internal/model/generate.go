@@ -30,6 +30,11 @@ type GenerateRequest struct {
 type GenerateOptions struct {
 	Temperature      *float64 `json:"temperature,omitempty"`
 	NumPredict       *int     `json:"num_predict,omitempty"`
+	// NumCtx / NumGPU are load-time options (Ollama parity). When they differ
+	// from how the model is currently loaded, the runtime reloads it with the
+	// requested context window / GPU-layer count before serving the request.
+	NumCtx *int `json:"num_ctx,omitempty"`
+	NumGPU *int `json:"num_gpu,omitempty"`
 	TopP             *float64 `json:"top_p,omitempty"`
 	TopK             *int     `json:"top_k,omitempty"`
 	MinP             *float64 `json:"min_p,omitempty"`

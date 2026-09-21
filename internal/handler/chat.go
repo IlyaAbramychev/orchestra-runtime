@@ -42,6 +42,9 @@ func (h *ChatHandler) ChatCompletion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.OperiumProgress {
+		req.Messages = withStructuredInstruction(req.Messages, operiumProgressInstruction)
+	}
 
 	if req.Stream {
 		if toolMode.active {
@@ -153,7 +156,11 @@ func (h *ChatHandler) handleOllamaComplete(
 	}
 	doneReason := result.FinishReason
 	if hasToolCalls {
-		message.Content = ""
+		// Ollama returns content and thinking next to tool calls. Only calls
+		// recovered from raw text leave call syntax in content.
+		if len(result.ToolCalls) == 0 {
+			message.Content = ""
+		}
 		message.ToolCalls = toolCalls
 		doneReason = ollamaToolDoneReason(doneReason)
 	}
@@ -215,27 +222,37 @@ func (h *ChatHandler) handleOllamaStream(
 			return
 		}
 
-		resp := model.OllamaChatResponse{
-			Model:     req.Model,
-			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		}
-		if chunk.Done {
-			resp.Done = true
-			resp.DoneReason = chunk.FinishReason
-			resp.TotalDurationNs = chunk.Timings.TotalNs
-			resp.PromptEvalDurationNs = chunk.Timings.PromptEvalNs
-			resp.PromptEvalCount = chunk.PromptTokens
-			resp.EvalDurationNs = chunk.Timings.EvalNs
-			resp.EvalCount = chunk.CompletionTokens
-		} else {
-			resp.Message = model.ChatMessage{Role: "assistant", Content: chunk.Text}
+		// Emit content/thinking whenever present — covers live deltas and the
+		// buffered native-chat case where the whole parsed message arrives on
+		// the Done chunk (previously dropped).
+		if chunk.Text != "" || chunk.Reasoning != "" {
+			msgResp := model.OllamaChatResponse{
+				Model:     req.Model,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				Message:   model.ChatMessage{Role: "assistant", Content: chunk.Text, Thinking: chunk.Reasoning},
+			}
+			if data, err := json.Marshal(msgResp); err == nil {
+				fmt.Fprintf(w, "%s\n", data)
+				flusher.Flush()
+			}
 		}
 
-		if data, err := json.Marshal(resp); err == nil {
-			fmt.Fprintf(w, "%s\n", data)
-			flusher.Flush()
-		}
 		if chunk.Done {
+			resp := model.OllamaChatResponse{
+				Model:                req.Model,
+				CreatedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+				Done:                 true,
+				DoneReason:           chunk.FinishReason,
+				TotalDurationNs:      chunk.Timings.TotalNs,
+				PromptEvalDurationNs: chunk.Timings.PromptEvalNs,
+				PromptEvalCount:      chunk.PromptTokens,
+				EvalDurationNs:       chunk.Timings.EvalNs,
+				EvalCount:            chunk.CompletionTokens,
+			}
+			if data, err := json.Marshal(resp); err == nil {
+				fmt.Fprintf(w, "%s\n", data)
+				flusher.Flush()
+			}
 			break
 		}
 	}
@@ -294,6 +311,22 @@ func (h *ChatHandler) handleOllamaBufferedStream(
 	w.WriteHeader(http.StatusOK)
 
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if thinking != "" {
+		writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
+			Model:     req.Model,
+			CreatedAt: createdAt,
+			Message:   model.ChatMessage{Role: "assistant", Thinking: thinking},
+		})
+	}
+	// Same rule as the OpenAI tool stream: keep visible text next to native
+	// tool calls, but never repeat call syntax recovered from raw text.
+	if content != "" && (!hasToolCalls || len(final.ToolCalls) > 0) {
+		writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
+			Model:     req.Model,
+			CreatedAt: createdAt,
+			Message:   model.ChatMessage{Role: "assistant", Content: content},
+		})
+	}
 	if hasToolCalls {
 		writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
 			Model:     req.Model,
@@ -304,21 +337,6 @@ func (h *ChatHandler) handleOllamaBufferedStream(
 				ToolCalls: toolCalls,
 			},
 		})
-	} else {
-		if thinking != "" {
-			writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
-				Model:     req.Model,
-				CreatedAt: createdAt,
-				Message:   model.ChatMessage{Role: "assistant", Thinking: thinking},
-			})
-		}
-		if content != "" {
-			writeOllamaChatStreamResponse(w, flusher, model.OllamaChatResponse{
-				Model:     req.Model,
-				CreatedAt: createdAt,
-				Message:   model.ChatMessage{Role: "assistant", Content: content},
-			})
-		}
 	}
 
 	doneReason := final.FinishReason
@@ -386,6 +404,11 @@ func (h *ChatHandler) handleComplete(
 		}
 		if hasToolCalls {
 			finishReason := "tool_calls"
+			var content *string
+			if result.Text != "" && len(result.ToolCalls) > 0 {
+				visible := result.Text
+				content = &visible
+			}
 			writeJSON(w, http.StatusOK, model.OpenAIChatCompletionResponse{
 				ID:      "chatcmpl-" + uuid.New().String()[:8],
 				Object:  "chat.completion",
@@ -394,9 +417,10 @@ func (h *ChatHandler) handleComplete(
 				Choices: []model.OpenAIChoice{{
 					Index: 0,
 					Message: &model.OpenAIResponseMessage{
-						Role:      "assistant",
-						Content:   nil,
-						ToolCalls: toOpenAIToolCalls(toolCalls, false),
+						Role:             "assistant",
+						Content:          content,
+						ReasoningContent: result.Reasoning,
+						ToolCalls:        toOpenAIToolCalls(toolCalls, false),
 					},
 					FinishReason: &finishReason,
 				}},
@@ -520,6 +544,30 @@ func (h *ChatHandler) handleOpenAIToolStream(
 
 	id := "chatcmpl-" + uuid.New().String()[:8]
 	created := time.Now().Unix()
+	if final.Reasoning != "" {
+		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			Choices: []model.OpenAIChunkChoice{{Index: 0, Delta: &model.OpenAIResponseDelta{Role: "assistant", ReasoningContent: final.Reasoning}}},
+		})
+	}
+	// Text the model writes next to native tool calls belongs to the same
+	// assistant turn. Dropping it hid every Operium progress block emitted on
+	// a tool round, so Desktop's progress panel stayed empty in agent mode.
+	// Calls recovered from raw text (old-worker compatibility) leave the call
+	// syntax in text, so it is not repeated as content.
+	if text != "" && (!hasToolCalls || len(final.ToolCalls) > 0) {
+		content := text
+		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   req.Model,
+			Choices: []model.OpenAIChunkChoice{{
+				Index: 0,
+				Delta: &model.OpenAIResponseDelta{Role: "assistant", Content: &content},
+			}},
+		})
+	}
 	if hasToolCalls {
 		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
 			ID:      id,
@@ -533,24 +581,6 @@ func (h *ChatHandler) handleOpenAIToolStream(
 					ToolCalls: toOpenAIToolCalls(toolCalls, true),
 				},
 			}},
-		})
-	} else if text != "" {
-		content := text
-		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
-			ID:      id,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   req.Model,
-			Choices: []model.OpenAIChunkChoice{{
-				Index: 0,
-				Delta: &model.OpenAIResponseDelta{Role: "assistant", Content: &content},
-			}},
-		})
-	}
-	if final.Reasoning != "" {
-		writeOpenAISSE(w, flusher, model.OpenAIChatCompletionChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-			Choices: []model.OpenAIChunkChoice{{Index: 0, Delta: &model.OpenAIResponseDelta{Role: "assistant", ReasoningContent: final.Reasoning}}},
 		})
 	}
 
@@ -604,6 +634,8 @@ func ollamaToChatCompletionRequest(req *model.OllamaChatRequest) *model.ChatComp
 	o := req.Options
 	out.Temperature = o.Temperature
 	out.NumPredict = o.NumPredict
+	out.NumCtx = o.NumCtx
+	out.NumGPU = o.NumGPU
 	out.TopP = o.TopP
 	out.TopK = o.TopK
 	out.MinP = o.MinP
@@ -659,10 +691,34 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *
 			return
 		}
 
-		var sseChunk model.ChatCompletionChunk
+		// Emit any content/reasoning as a delta. This covers both live token
+		// deltas and the buffered native-chat case, where the whole parsed
+		// message (harmony/<think> stripped into content + reasoning) arrives
+		// on the Done chunk — previously dropped because the Done branch sent
+		// an empty delta.
+		if chunk.Text != "" || chunk.Reasoning != "" {
+			data, _ := json.Marshal(model.ChatCompletionChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   req.Model,
+				Choices: []model.ChunkChoice{
+					{
+						Index: 0,
+						Delta: &model.ChatMessage{
+							Role:             "assistant",
+							Content:          chunk.Text,
+							ReasoningContent: chunk.Reasoning,
+						},
+					},
+				},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
 
 		if chunk.Done {
-			sseChunk = model.ChatCompletionChunk{
+			data, _ := json.Marshal(model.ChatCompletionChunk{
 				ID:      id,
 				Object:  "chat.completion.chunk",
 				Created: created,
@@ -682,30 +738,9 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, req *
 					EvalDurationNs:       chunk.Timings.EvalNs,
 					EvalCount:            chunk.CompletionTokens,
 				},
-			}
-		} else {
-			sseChunk = model.ChatCompletionChunk{
-				ID:      id,
-				Object:  "chat.completion.chunk",
-				Created: created,
-				Model:   req.Model,
-				Choices: []model.ChunkChoice{
-					{
-						Index: 0,
-						Delta: &model.ChatMessage{
-							Role:    "assistant",
-							Content: chunk.Text,
-						},
-					},
-				},
-			}
-		}
-
-		data, _ := json.Marshal(sseChunk)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-
-		if chunk.Done {
+			})
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 			break
 		}
 	}

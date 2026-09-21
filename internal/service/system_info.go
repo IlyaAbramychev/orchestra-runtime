@@ -28,6 +28,13 @@ type lastErrorReporter interface {
 	LastError() string
 }
 
+type backendReadiness interface {
+	BackendReady() bool
+}
+
+// BackendStarting is reported while the inference backend initializes.
+const BackendStarting = "starting"
+
 // Version is the runtime's advertised build version, surfaced via /api/system.
 // It is set at process start from the `main.version` variable in cmd/server,
 // which the Makefile populates via `-ldflags="-X main.version=$(VERSION)"`.
@@ -53,40 +60,83 @@ type SystemInfo struct {
 	engine    engine.Backend
 	scheduler *RuntimeScheduler
 
-	hwMu     sync.Mutex
-	hwCache  hwSample
-	hwMaxAge time.Duration
+	hwMu         sync.Mutex
+	hwCache      hwSample
+	hwMaxAge     time.Duration
+	hwRefreshing bool
+	sampleHW     func() hwSample
 }
 
 func NewSystemInfo(eng engine.Backend) *SystemInfo {
 	return &SystemInfo{
 		engine:   eng,
 		hwMaxAge: 5 * time.Second,
+		sampleHW: sampleHardware,
 	}
+}
+
+func sampleHardware() hwSample {
+	return hwSample{
+		totalRAM:     getTotalRAM(),
+		availableRAM: getAvailableRAM(),
+		gpu:          detectGPU(),
+		sampledAt:    time.Now(),
+	}
+}
+
+// RefreshHardware samples hardware synchronously. Call it once in the
+// background at startup so the first /api/system request is already warm.
+func (s *SystemInfo) RefreshHardware() {
+	sample := s.sampleHW()
+	s.hwMu.Lock()
+	s.hwCache = sample
+	s.hwRefreshing = false
+	s.hwMu.Unlock()
 }
 
 func (s *SystemInfo) SetScheduler(scheduler *RuntimeScheduler) {
 	s.scheduler = scheduler
 }
 
-// hardware returns a lightly-cached hardware snapshot.
+// hardware returns the latest hardware sample and refreshes a stale one in
+// the background. Sampling forks sysctl/vm_stat, which takes hundreds of
+// milliseconds while a multi-GB model is being mapped, so only a request that
+// arrives before any sample exists waits for it.
 func (s *SystemInfo) hardware() (int64, int64, *model.GPUInfo) {
 	s.hwMu.Lock()
-	defer s.hwMu.Unlock()
-	if time.Since(s.hwCache.sampledAt) < s.hwMaxAge && s.hwCache.totalRAM > 0 {
-		return s.hwCache.totalRAM, s.hwCache.availableRAM, s.hwCache.gpu
+	cached := s.hwCache
+	if cached.sampledAt.IsZero() {
+		s.hwMu.Unlock()
+		s.RefreshHardware()
+		s.hwMu.Lock()
+		cached = s.hwCache
+		s.hwMu.Unlock()
+		return cached.totalRAM, cached.availableRAM, cached.gpu
 	}
-	s.hwCache = hwSample{
-		totalRAM:     getTotalRAM(),
-		availableRAM: getAvailableRAM(),
-		gpu:          detectGPU(),
-		sampledAt:    time.Now(),
+	if time.Since(cached.sampledAt) >= s.hwMaxAge && !s.hwRefreshing {
+		s.hwRefreshing = true
+		go s.RefreshHardware()
 	}
-	return s.hwCache.totalRAM, s.hwCache.availableRAM, s.hwCache.gpu
+	s.hwMu.Unlock()
+	return cached.totalRAM, cached.availableRAM, cached.gpu
 }
 
-func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
-	totalRAM, availableRAM, gpu := s.hardware()
+// BackendState reports "starting" until the backend finished initializing,
+// then "ready". Backends without an init phase are always ready.
+func (s *SystemInfo) BackendState() string {
+	if s == nil || s.engine == nil {
+		return engine.StateReady
+	}
+	if r, ok := s.engine.(backendReadiness); ok && !r.BackendReady() {
+		return BackendStarting
+	}
+	return engine.StateReady
+}
+
+// runtimeState combines the scheduler's active operation with backend
+// startup so clients see "starting" instead of an idle runtime that cannot
+// serve yet.
+func (s *SystemInfo) runtimeState() (string, string) {
 	engineState := s.engine.State()
 	currentModelID := s.engine.LoadedModelID()
 	if s.scheduler != nil {
@@ -96,6 +146,15 @@ func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 			currentModelID = snapshot.ActiveModelID
 		}
 	}
+	if engineState == engine.StateIdle && s.BackendState() == BackendStarting {
+		engineState = BackendStarting
+	}
+	return engineState, currentModelID
+}
+
+func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
+	totalRAM, availableRAM, gpu := s.hardware()
+	engineState, currentModelID := s.runtimeState()
 	info := &model.SystemInfoResponse{
 		Service:            "orchestra-runtime",
 		Version:            Version,
@@ -124,15 +183,7 @@ func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 }
 
 func (s *SystemInfo) GetStatus() *model.RuntimeStatusResponse {
-	engineState := s.engine.State()
-	currentModelID := s.engine.LoadedModelID()
-	if s.scheduler != nil {
-		snapshot := s.scheduler.Snapshot()
-		engineState = snapshot.State
-		if snapshot.ActiveModelID != "" {
-			currentModelID = snapshot.ActiveModelID
-		}
-	}
+	engineState, currentModelID := s.runtimeState()
 
 	var modelID *string
 	if currentModelID != "" {

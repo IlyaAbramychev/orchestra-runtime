@@ -52,7 +52,7 @@ func (s *EmbeddingService) EmbedForModel(
 	// Take the shared inference slot once for the whole batch so nobody else
 	// jumps the queue mid-embedding. Ensures KV clear + decode per input are
 	// atomic.
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, "embeddings")
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, nil, "embeddings")
 	if err != nil {
 		return nil, err
 	}

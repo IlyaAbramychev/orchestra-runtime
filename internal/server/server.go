@@ -66,7 +66,10 @@ func (s *Server) Start() error {
 		// Lazy spawn — worker starts on first LoadModel.
 	} else {
 		eng := engine.New()
-		eng.InitBackend()
+		// Metal/CUDA initialization takes seconds on a cold start. Open the
+		// listener right away: LoadModel waits for the backend, and /health
+		// reports "starting" until it is ready.
+		go eng.InitBackend()
 		s.backend = eng
 		s.ownsEngine = true
 		slog.Info("inference backend: in-process")
@@ -87,10 +90,14 @@ func (s *Server) Start() error {
 	s.scheduler = scheduler
 	modelMgr := service.NewModelManagerWithScheduler(registry, scheduler, s.cfg.ModelsDir)
 	modelMgr.SetDefaultLoadOptions(defaultLoadOptionsFromConfig(s.cfg))
+	// Read GGUF headers of every registered model now, so the first
+	// /api/tags or /api/models request does not pay for a cold metadata cache.
+	go modelMgr.List()
 	inferSvc := service.NewInferenceServiceWithScheduler(scheduler)
 	inferSvc.SetModelLoader(modelMgr)
 	sysInfo := service.NewSystemInfo(s.backend)
 	sysInfo.SetScheduler(scheduler)
+	go sysInfo.RefreshHardware()
 
 	embedSvc := service.NewEmbeddingServiceWithScheduler(scheduler)
 	embedSvc.SetModelLoader(modelMgr)
@@ -114,11 +121,14 @@ func (s *Server) Start() error {
 	slog.Info("starting Orchestra Runtime", "addr", addr, "models_dir", s.cfg.ModelsDir)
 
 	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      s.router,
-		ReadTimeout:  5 * time.Minute,
-		WriteTimeout: 10 * time.Minute,
-		IdleTimeout:  60 * time.Second,
+		Addr:              addr,
+		Handler:           s.router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		// No WriteTimeout: it covers the whole response, so it cut off long
+		// agent generations, buffered tool-call streams and multi-GB pulls
+		// mid-flight. Client disconnects still cancel work via r.Context().
+		IdleTimeout: 60 * time.Second,
 	}
 
 	return s.httpServer.ListenAndServe()

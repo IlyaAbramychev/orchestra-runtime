@@ -71,7 +71,15 @@ type ModelManager struct {
 	defaultLoadOptions engine.LoadOptions
 	loadPlanner        *LoadPlanner
 	loadMu             sync.Mutex
-	pullMu             sync.Mutex
+	// activeLoad* record the num_ctx / num_gpu the CURRENT load was requested
+	// with (not the post-auto-fit values), so a repeated request with the same
+	// num_ctx does not trigger a reload loop. Guarded by activeLoadMu.
+	// activeLoadValid is false when no model is loaded.
+	activeLoadMu    sync.Mutex
+	activeLoadValid bool
+	activeLoadCtx   int
+	activeLoadGPU   int
+	pullMu          sync.Mutex
 	downloads          sync.Map // id -> *DownloadState
 	ollamaPulls        sync.Map // registry ref -> *ollamaPullState
 }
@@ -346,6 +354,15 @@ func (m *ModelManager) EnsureLoadedFor(ctx context.Context, ref, capability stri
 }
 
 func (m *ModelManager) EnsureLoadedForCapabilities(ctx context.Context, ref string, capabilities []string) error {
+	return m.EnsureLoadedWithOverrides(ctx, ref, capabilities, nil, nil)
+}
+
+// EnsureLoadedWithOverrides loads the model for the given capabilities, applying
+// per-request num_ctx / num_gpu (Ollama parity). When the model is already
+// loaded but with a different context window / GPU-layer count than requested,
+// it is reloaded; when no override is given (or it matches), an already-loaded
+// model is reused as-is.
+func (m *ModelManager) EnsureLoadedWithOverrides(ctx context.Context, ref string, capabilities []string, numCtx, numGPU *int) error {
 	entry, err := m.ResolveModel(ref)
 	if err != nil {
 		return err
@@ -353,7 +370,7 @@ func (m *ModelManager) EnsureLoadedForCapabilities(ctx context.Context, ref stri
 	if err := m.requireModelCapabilities(entry, capabilities); err != nil {
 		return err
 	}
-	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
+	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() && !m.activeLoadNeedsReload(numCtx, numGPU) {
 		return nil
 	}
 
@@ -367,10 +384,18 @@ func (m *ModelManager) EnsureLoadedForCapabilities(ctx context.Context, ref stri
 	if err := m.requireModelCapabilities(entry, capabilities); err != nil {
 		return err
 	}
-	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() {
+	if m.engine.LoadedModelID() == entry.ID && m.engine.IsLoaded() && !m.activeLoadNeedsReload(numCtx, numGPU) {
 		return nil
 	}
-	return m.LoadModelWithContext(ctx, entry.ID, m.DefaultLoadOptionsForModel(entry.ID))
+	opts := m.DefaultLoadOptionsForModel(entry.ID)
+	if numCtx != nil && *numCtx > 0 {
+		opts.CtxSize = *numCtx
+		opts.CtxSizeExplicit = true
+	}
+	if numGPU != nil {
+		opts.GPULayers = *numGPU
+	}
+	return m.LoadModelWithContext(ctx, entry.ID, opts)
 }
 
 func (m *ModelManager) requireModelCapabilities(entry *storage.ModelEntry, capabilities []string) error {
@@ -1009,11 +1034,48 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 		attempts = append(attempts, attempt.Options)
 	}
 	if m.scheduler != nil {
-		_, err = m.scheduler.LoadModelAttempts(ctx, id, entry.FilePath, attempts)
+		if _, err = m.scheduler.LoadModelAttempts(ctx, id, entry.FilePath, attempts); err == nil {
+			m.recordActiveLoad(opts)
+		}
 		return err
 	}
-	_, err = loadModelWithAttempts(ctx, m.engine, id, entry.FilePath, attempts)
+	if _, err = loadModelWithAttempts(ctx, m.engine, id, entry.FilePath, attempts); err == nil {
+		m.recordActiveLoad(opts)
+	}
 	return err
+}
+
+// recordActiveLoad remembers the num_ctx / num_gpu the current model was
+// requested with, for the reload-on-change decision in EnsureLoadedWithOverrides.
+func (m *ModelManager) recordActiveLoad(opts engine.LoadOptions) {
+	m.activeLoadMu.Lock()
+	m.activeLoadValid = true
+	m.activeLoadCtx = opts.CtxSize
+	m.activeLoadGPU = opts.GPULayers
+	m.activeLoadMu.Unlock()
+}
+
+func (m *ModelManager) clearActiveLoad() {
+	m.activeLoadMu.Lock()
+	m.activeLoadValid = false
+	m.activeLoadMu.Unlock()
+}
+
+// activeLoadNeedsReload reports whether a request asking for numCtx / numGPU
+// requires reloading the currently-loaded model.
+func (m *ModelManager) activeLoadNeedsReload(numCtx, numGPU *int) bool {
+	m.activeLoadMu.Lock()
+	defer m.activeLoadMu.Unlock()
+	if !m.activeLoadValid {
+		return true
+	}
+	if numCtx != nil && *numCtx > 0 && *numCtx != m.activeLoadCtx {
+		return true
+	}
+	if numGPU != nil && *numGPU != m.activeLoadGPU {
+		return true
+	}
+	return false
 }
 
 func mmprojSize(path string) (int64, error) {
@@ -1048,9 +1110,14 @@ func (m *ModelManager) UnloadModel() {
 
 func (m *ModelManager) unloadCurrentModel(ctx context.Context) error {
 	if m.scheduler != nil {
-		return m.scheduler.UnloadModel(ctx)
+		err := m.scheduler.UnloadModel(ctx)
+		if err == nil {
+			m.clearActiveLoad()
+		}
+		return err
 	}
 	m.engine.UnloadModel()
+	m.clearActiveLoad()
 	return nil
 }
 

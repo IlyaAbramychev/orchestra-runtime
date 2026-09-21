@@ -1,0 +1,71 @@
+Proposed Operium Desktop change so the reasoning area works with Orchestra Runtime
+in agent (tools) mode. Verified with scratchpad/progress/desktop_emulator.mjs
+--with-reasoning-patch against captured runtime SSE.
+
+--- a/src/lib/runtimeClient.js
++++ b/src/lib/runtimeClient.js
+@@ chatStream (/v1/chat/completions loop) @@
+       let assistantText = '';
++      // The runtime reports reasoning in `reasoning_content` whenever it parses
++      // the model's native chat format (always, when tools are sent). ChatView
++      // renders reasoning from <think> blocks, so re-wrap it here. It is not
++      // added to assistantText: reasoning must never be resent as history.
++      let reasoningOpen = false;
+@@
+             const data = JSON.parse(trimmed);
+             const choice = data.choices?.[0];
++            const reasoning = choice?.delta?.reasoning_content;
++            if (reasoning) {
++              if (!reasoningOpen) {
++                reasoningOpen = true;
++                yield '<think>';
++              }
++              yield reasoning;
++            }
+             const delta = choice?.delta?.content;
++            if (reasoningOpen && (delta || choice?.delta?.tool_calls?.length || choice?.finish_reason)) {
++              reasoningOpen = false;
++              yield '</think>\n';
++            }
+             if (delta) {
+
+--- a/src/hooks/use-chat.js
++++ b/src/hooks/use-chat.js
+@@ splitReasoning @@
+-export function splitReasoning(content) {
+-  const closedMatch = content.match(/<think>([\s\S]*?)<\/think>([\s\S]*)/);
+-  ...
+-}
++// A tool loop produces one reasoning block per round, so every closed block
++// is collected; only the first used to be read, and later rounds' reasoning
++// leaked into the answer with its tags.
++export function splitReasoning(content) {
++  const parts = [];
++  let body = content.replace(/<think>([\s\S]*?)<\/think>/g, (match, text) => {
++    if (text.trim()) parts.push(text.trim());
++    return '';
++  });
++  let streamingThinking = false;
++  const open = body.lastIndexOf('<think>');
++  if (open >= 0) {
++    const tail = body.slice(open + '<think>'.length).trim();
++    if (tail) parts.push(tail);
++    body = body.slice(0, open);
++    streamingThinking = true;
++  }
++  // A model quoting the tag inside its reasoning leaves a stray closer.
++  body = body.replace(/<\/think>/g, '');
++  return {
++    thinking: parts.length ? parts.join('\n\n') : null,
++    streamingThinking,
++    body: body.trim(),
++  };
++}
+
+--- a/src/hooks/use-chat.js
++++ b/src/hooks/use-chat.js
+@@ SYSTEM_PROMPT @@
+-  'Используй Markdown для форматирования. Для reasoning-моделей выводи размышления в <think>...</think>.';
++  'Используй Markdown для форматирования.';
+   // Models with native thinking already emit <think>; the instruction made
+   // Qwen3.5 quote the tag inside its reasoning, which cut reasoning short.

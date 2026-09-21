@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +32,29 @@ type Engine struct {
 	idleTimeout time.Duration
 	lastUsedAt  time.Time
 	idleTimer   *time.Timer
+
+	// status is an immutable copy of the fields above, republished under mu on
+	// every change. Status readers load it without touching mu: Complete,
+	// CompleteStream and LoadModel hold mu for a whole generation or native
+	// load, and health/model-list endpoints must not wait behind them.
+	status atomic.Pointer[engineStatus]
+
+	// backendReady is closed once llama.cpp backend init has finished. Init
+	// runs asynchronously at startup so the HTTP listener opens immediately.
+	backendReady chan struct{}
+	backendOnce  sync.Once
+}
+
+type engineStatus struct {
+	state       string
+	modelID     string
+	desc        string
+	contextSize int
+	loadOpts    LoadOptions
+	loadedAt    time.Time
+	lastError   string
+	idleTimeout time.Duration
+	loaded      bool
 }
 
 const (
@@ -43,7 +67,37 @@ const (
 )
 
 func New() *Engine {
-	return &Engine{state: StateIdle}
+	e := &Engine{state: StateIdle, backendReady: make(chan struct{})}
+	e.publishStatusLocked()
+	return e
+}
+
+// publishStatusLocked snapshots lifecycle fields for lock-free readers. Call
+// it after every mutation of state, model identity, options or idle timeout.
+func (e *Engine) publishStatusLocked() {
+	st := &engineStatus{
+		state:       e.state,
+		modelID:     e.modelID,
+		loadOpts:    e.loadOpts,
+		loadedAt:    e.loadedAt,
+		lastError:   e.lastError,
+		idleTimeout: e.idleTimeout,
+		loaded:      e.state == StateReady && e.model != nil && e.ctx != nil,
+	}
+	if e.model != nil && e.model.ptr != nil {
+		st.desc = e.model.Desc()
+	}
+	if e.ctx != nil {
+		st.contextSize = e.ctx.NCtx()
+	}
+	e.status.Store(st)
+}
+
+func (e *Engine) snapshot() *engineStatus {
+	if st := e.status.Load(); st != nil {
+		return st
+	}
+	return &engineStatus{state: StateIdle}
 }
 
 // SetIdleTimeout enables automatic model unload after `d` of inactivity.
@@ -51,6 +105,7 @@ func New() *Engine {
 func (e *Engine) SetIdleTimeout(d time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.publishStatusLocked()
 	e.idleTimeout = d
 	if d <= 0 {
 		e.stopIdleTimerLocked()
@@ -63,9 +118,7 @@ func (e *Engine) SetIdleTimeout(d time.Duration) {
 
 // IdleTimeout returns the currently configured idle timeout (0 if disabled).
 func (e *Engine) IdleTimeout() time.Duration {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.idleTimeout
+	return e.snapshot().idleTimeout
 }
 
 // MarkUsed records that an inference request just completed. Streaming and
@@ -105,6 +158,7 @@ func (e *Engine) ApplyKeepAlive(seconds *int64) {
 		}
 	}
 	e.markUsedLocked()
+	e.publishStatusLocked()
 	e.mu.Unlock()
 }
 
@@ -152,12 +206,39 @@ func (e *Engine) onIdleTimer() {
 	e.unloadLocked()
 }
 
+// InitBackend initializes llama.cpp exactly once. It is safe to run in a
+// goroutine: LoadModel waits for it to finish.
 func (e *Engine) InitBackend() {
-	llamaBackendInit()
-	slog.Info("llama.cpp backend initialized")
+	e.backendOnce.Do(func() {
+		start := time.Now()
+		installNativeLogger()
+		llamaBackendInit()
+		if e.backendReady != nil {
+			close(e.backendReady)
+		}
+		slog.Info("llama.cpp backend initialized", "duration_ms", time.Since(start).Milliseconds())
+	})
+}
+
+// BackendReady reports whether InitBackend has completed.
+func (e *Engine) BackendReady() bool {
+	if e.backendReady == nil {
+		return true
+	}
+	select {
+	case <-e.backendReady:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Engine) FreeBackend() {
+	// Freeing while an asynchronous init is still running would race inside
+	// ggml; the process is exiting anyway, so skip it.
+	if !e.BackendReady() {
+		return
+	}
 	llamaBackendFree()
 	slog.Info("llama.cpp backend freed")
 }
@@ -263,6 +344,10 @@ func (o *LoadOptions) normalize() {
 func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	opts.normalize()
 
+	if e.backendReady != nil {
+		<-e.backendReady
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -271,6 +356,8 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 
 	e.state = StateLoading
 	e.lastError = ""
+	e.modelID = modelID
+	e.publishStatusLocked()
 	slog.Info("loading model",
 		"path", path,
 		"gpu_layers", opts.GPULayers,
@@ -293,6 +380,8 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	if err != nil {
 		e.state = StateError
 		e.lastError = err.Error()
+		e.modelID = ""
+		e.publishStatusLocked()
 		return fmt.Errorf("load model: %w", err)
 	}
 
@@ -312,6 +401,8 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 		model.Free()
 		e.state = StateError
 		e.lastError = err.Error()
+		e.modelID = ""
+		e.publishStatusLocked()
 		return fmt.Errorf("create context: %w", err)
 	}
 	mtmd, err := mtmdContextLoad(opts.MMProjPath, model, opts)
@@ -320,6 +411,8 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 		model.Free()
 		e.state = StateError
 		e.lastError = err.Error()
+		e.modelID = ""
+		e.publishStatusLocked()
 		return err
 	}
 
@@ -335,6 +428,7 @@ func (e *Engine) LoadModel(modelID, path string, opts LoadOptions) error {
 	e.lastError = ""
 	e.state = StateReady
 	e.markUsedLocked()
+	e.publishStatusLocked()
 
 	slog.Info("model loaded",
 		"id", modelID,
@@ -380,65 +474,47 @@ func (e *Engine) unloadLocked() {
 	e.loadOpts = LoadOptions{}
 	e.loadedAt = time.Time{}
 	e.state = StateIdle
+	e.publishStatusLocked()
 }
+
+// Status readers below never take e.mu; see Engine.status.
 
 // IsLoaded returns true if a model is loaded and ready for inference.
 func (e *Engine) IsLoaded() bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.state == StateReady && e.model != nil && e.ctx != nil
+	return e.snapshot().loaded
 }
 
 // State returns the current engine state.
 func (e *Engine) State() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.state
+	return e.snapshot().state
 }
 
 // LoadedModelID returns the ID of the currently loaded model, or empty string.
+// While a load is in progress it returns the model being loaded.
 func (e *Engine) LoadedModelID() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.modelID
+	return e.snapshot().modelID
 }
 
 // LoadedContextSize returns the effective llama.cpp context window for the
 // currently loaded model. It can differ from the requested n_ctx because
 // llama.cpp may round or clamp context parameters during context creation.
 func (e *Engine) LoadedContextSize() int {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if e.ctx == nil {
-		return 0
-	}
-	return e.ctx.NCtx()
+	return e.snapshot().contextSize
 }
 
 func (e *Engine) LoadedOptions() LoadOptions {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.loadOpts
+	return e.snapshot().loadOpts
 }
 
 func (e *Engine) LoadedAt() time.Time {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.loadedAt
+	return e.snapshot().loadedAt
 }
 
 func (e *Engine) LastError() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.lastError
+	return e.snapshot().lastError
 }
 
 // ModelDesc returns the description of the loaded model.
 func (e *Engine) ModelDesc() string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if e.model == nil {
-		return ""
-	}
-	return e.model.Desc()
+	return e.snapshot().desc
 }

@@ -186,7 +186,15 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	} else if params.NativeChat {
 		prompt, nativeRender, err = e.buildNativePrompt(promptMessages, &params)
 		if err != nil {
-			return nil, fmt.Errorf("build native chat prompt: %w", err)
+			// Degrade to the simple template path so a model with a missing or
+			// unparseable chat template still answers. Native reasoning/tool
+			// parsing is unavailable for it (nativeRender stays nil).
+			slog.Warn("native chat prompt failed; using simple template", "error", err)
+			nativeRender = nil
+			prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
+			if err != nil {
+				return nil, fmt.Errorf("build prompt: %w", err)
+			}
 		}
 	} else {
 		prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
@@ -330,8 +338,15 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 	} else if params.NativeChat {
 		prompt, nativeRender, err = e.buildNativePrompt(promptMessages, &params)
 		if err != nil {
-			e.mu.Unlock()
-			return nil, fmt.Errorf("build native chat prompt: %w", err)
+			// Degrade to the simple template path (see Complete). nativeRender
+			// stays nil, so native reasoning/tool parsing is skipped.
+			slog.Warn("native chat prompt failed; using simple template", "error", err)
+			nativeRender = nil
+			prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
+			if err != nil {
+				e.mu.Unlock()
+				return nil, fmt.Errorf("build prompt: %w", err)
+			}
 		}
 	} else {
 		prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)

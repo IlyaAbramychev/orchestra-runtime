@@ -32,6 +32,24 @@ type ModelLoader interface {
 	DefaultsForModel(model string) (ModelRequestDefaults, error)
 }
 
+// contextAwareLoader is an optional extension of ModelLoader: loaders that
+// implement it can reload the model with a per-request context window / GPU
+// layer count (Ollama's num_ctx / num_gpu). Kept separate so embeddings and
+// test loaders need not implement it.
+type contextAwareLoader interface {
+	EnsureLoadedWithOverrides(ctx context.Context, model string, capabilities []string, numCtx, numGPU *int) error
+}
+
+// loadOverride carries per-request load-time options (num_ctx / num_gpu).
+type loadOverride struct {
+	NumCtx *int
+	NumGPU *int
+}
+
+func (o *loadOverride) empty() bool {
+	return o == nil || (o.NumCtx == nil && o.NumGPU == nil)
+}
+
 func NewInferenceService(eng engine.Backend, maxQueue int) *InferenceService {
 	return NewInferenceServiceWithScheduler(NewRuntimeScheduler(eng, maxQueue))
 }
@@ -58,6 +76,7 @@ func acquireLoadedModel(
 	backend engine.Backend,
 	loader ModelLoader,
 	model string,
+	override *loadOverride,
 	capabilities ...string,
 ) (func(), error) {
 	if len(capabilities) == 0 {
@@ -71,7 +90,12 @@ func acquireLoadedModel(
 				return nil, err
 			}
 			expectedModelID = resolvedID
-			if err := loader.EnsureLoadedForCapabilities(ctx, model, capabilities); err != nil {
+			if ca, ok := loader.(contextAwareLoader); ok && !override.empty() {
+				err = ca.EnsureLoadedWithOverrides(ctx, model, capabilities, override.NumCtx, override.NumGPU)
+			} else {
+				err = loader.EnsureLoadedForCapabilities(ctx, model, capabilities)
+			}
+			if err != nil {
 				return nil, err
 			}
 		} else if !backend.IsLoaded() {
@@ -171,7 +195,7 @@ func (s *InferenceService) Generate(
 	if len(images) > 0 {
 		capability = "vision"
 	}
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, capability)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, nil, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +218,7 @@ func (s *InferenceService) GenerateStream(
 	if len(images) > 0 {
 		capability = "vision"
 	}
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, capability)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, nil, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +251,7 @@ func buildGenerateMessages(prompt, system string, images []string, params *engin
 
 // Complete runs a non-streaming chat completion.
 func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompletionRequest) (*engine.CompletionResult, error) {
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, chatRequestCapabilities(req)...)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, &loadOverride{NumCtx: req.NumCtx, NumGPU: req.NumGPU}, chatRequestCapabilities(req)...)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +266,7 @@ func (s *InferenceService) Complete(ctx context.Context, req *model.ChatCompleti
 
 // CompleteStream runs a streaming chat completion.
 func (s *InferenceService) CompleteStream(ctx context.Context, req *model.ChatCompletionRequest) (<-chan engine.CompletionChunk, error) {
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, chatRequestCapabilities(req)...)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, req.Model, &loadOverride{NumCtx: req.NumCtx, NumGPU: req.NumGPU}, chatRequestCapabilities(req)...)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +400,14 @@ func toEngineParams(req *model.ChatCompletionRequest) engine.CompletionParams {
 		params.Stop = req.Stop
 	}
 	params.Grammar = req.Grammar
-	params.NativeChat = len(req.Tools) > 0 || len(req.Think) > 0 || req.ReasoningEffort != "" || messagesNeedNativeChat(req.Messages)
+	// Chat always renders and parses through llama.cpp's native chat pipeline
+	// (the model's real Jinja template). This is required for structured-output
+	// families — gpt-oss emits OpenAI *harmony* channels, qwen/deepseek emit
+	// <think> — whose reasoning and tool calls only separate correctly under
+	// native parsing. Without it those markers leak raw into message.content.
+	// The engine falls back to the simple template path if native render fails,
+	// so models with no usable chat template still answer.
+	params.NativeChat = true
 	if len(req.Tools) > 0 {
 		if encoded, err := json.Marshal(req.Tools); err == nil {
 			params.ToolsJSON = string(encoded)
@@ -392,15 +423,6 @@ func toEngineParams(req *model.ChatCompletionRequest) engine.CompletionParams {
 		params.EnableThinking = req.ReasoningEffort != "none"
 	}
 	return params
-}
-
-func messagesNeedNativeChat(messages []model.ChatMessage) bool {
-	for _, message := range messages {
-		if message.ReasoningContent != "" || message.Thinking != "" || len(message.ToolCalls) > 0 || message.ToolCallID != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func firstNonBlank(values ...string) string {

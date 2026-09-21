@@ -60,7 +60,10 @@ func main() {
 	defer os.Remove(socketPath)
 
 	eng := engine.New()
-	eng.InitBackend()
+	// The socket is already listening, so the host's dial and ping succeed
+	// while Metal initializes; load_model waits for the backend instead of
+	// the host's boot timeout racing a cold Metal start.
+	go eng.InitBackend()
 	defer eng.Close()
 
 	// Graceful shutdown on SIGTERM from supervisor.
