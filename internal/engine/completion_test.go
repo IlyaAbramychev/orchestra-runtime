@@ -2,8 +2,29 @@ package engine
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 )
+
+func TestNativeRenderFailureIsClassifiedForBothCompletionModes(t *testing.T) {
+	eng := New()
+	eng.state = StateReady // rendering fails before a llama context is touched
+	params := DefaultCompletionParams()
+	params.NativeChat = true
+	params.ToolsJSON = `[{"type":"function","function":{"name":"read_file"}}]`
+	messages := []ChatMessage{{Role: "user", Content: "read"}}
+	_, err := eng.Complete(context.Background(), messages, params)
+	var unavailable *NativeChatUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Code() != NativeChatUnavailableCode {
+		t.Fatalf("Complete error = %v", err)
+	}
+	_, err = eng.CompleteStream(context.Background(), messages, params)
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("CompleteStream error = %v", err)
+	}
+}
 
 func TestTrimAtStopRemovesStopSequence(t *testing.T) {
 	got, stopped := trimAtStop("hello<stop>leak", []string{"<stop>"})
@@ -145,5 +166,44 @@ func TestLooksLikeToolProtocolDetectsDamagedEnvelope(t *testing.T) {
 	}
 	if looksLikeToolProtocol("A normal answer about functions.") {
 		t.Fatal("plain content was misclassified as a tool protocol")
+	}
+}
+
+func TestNativeParseFailureDoesNotExposeRawReasoningOrToolEnvelope(t *testing.T) {
+	eng := &Engine{}
+	render := &NativeChatRender{Parser: "not a serialized PEG parser"}
+	for _, toolsActive := range []bool{false, true} {
+		result := &CompletionResult{Text: `<think>secret</think>{"tool_calls":[`, FinishReason: "stop"}
+		eng.applyNativeResult(result, result.Text, render, toolsActive)
+		want := "chat_protocol_error"
+		if toolsActive {
+			want = "tool_protocol_error"
+		}
+		if result.FinishReason != want || result.Text != "" || result.Reasoning != "" {
+			t.Fatalf("tools=%v result=%+v", toolsActive, result)
+		}
+	}
+}
+
+func TestNativePartialParserExposesIncrementalPlainContent(t *testing.T) {
+	render := &NativeChatRender{} // llama.cpp's content-only parser
+	for _, prefix := range []string{"H", "He", "Hel", "Hell", "Hello"} {
+		encoded, err := ParseNativeChatPartial(prefix, render)
+		if err != nil {
+			t.Fatalf("partial parse %q: %v", prefix, err)
+		}
+		var parsed nativeParsedMessage
+		if err := json.Unmarshal(encoded, &parsed); err != nil || parsed.Content != prefix {
+			t.Fatalf("partial parse %q = %+v, %v", prefix, parsed, err)
+		}
+	}
+}
+
+func TestDamagedToolEnvelopeKeepsProtocolFinishReason(t *testing.T) {
+	raw := `{"tool_calls":[{"function":{"name":"read_file","arguments":"{"}}]}`
+	result := &CompletionResult{Text: raw, FinishReason: "stop"}
+	(&Engine{}).applyNativeResult(result, raw, &NativeChatRender{}, true)
+	if result.FinishReason != "tool_protocol_error" || result.Text != "" || len(result.ToolCalls) != 0 {
+		t.Fatalf("damaged tool response = %+v", result)
 	}
 }

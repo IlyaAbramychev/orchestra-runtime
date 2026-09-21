@@ -40,6 +40,10 @@ type contextAwareLoader interface {
 	EnsureLoadedWithOverrides(ctx context.Context, model string, capabilities []string, numCtx, numGPU *int) error
 }
 
+type profileAwareLoader interface {
+	LoadedProfileMatches(numCtx, numGPU *int) bool
+}
+
 // loadOverride carries per-request load-time options (num_ctx / num_gpu).
 type loadOverride struct {
 	NumCtx *int
@@ -82,7 +86,17 @@ func acquireLoadedModel(
 	if len(capabilities) == 0 {
 		capabilities = []string{"chat"}
 	}
-	for {
+	if !override.empty() {
+		if _, ok := loader.(contextAwareLoader); !ok {
+			return nil, fmt.Errorf("model loader does not support load overrides")
+		}
+		if _, ok := loader.(profileAwareLoader); !ok {
+			return nil, fmt.Errorf("model loader cannot verify load overrides")
+		}
+	}
+	// A busy queue can repeatedly replace the model between load and acquire.
+	// Bound retries so incompatible profiles cannot cause an endless reload loop.
+	for attempt := 0; attempt < 4; attempt++ {
 		expectedModelID := ""
 		if loader != nil && model != "" {
 			resolvedID, err := loader.ResolveModelID(model)
@@ -122,8 +136,13 @@ func acquireLoadedModel(
 			release()
 			continue
 		}
+		if profile, ok := loader.(profileAwareLoader); ok && !override.empty() && !profile.LoadedProfileMatches(override.NumCtx, override.NumGPU) {
+			release()
+			continue
+		}
 		return release, nil
 	}
+	return nil, fmt.Errorf("model load changed before inference could start")
 }
 
 func (s *InferenceService) applyModelDefaults(model string, params *engine.CompletionParams) {
@@ -190,12 +209,13 @@ func (s *InferenceService) Generate(
 	prompt, system string,
 	images []string,
 	params engine.CompletionParams,
+	numCtx, numGPU *int,
 ) (*engine.CompletionResult, error) {
 	capability := "chat"
 	if len(images) > 0 {
 		capability = "vision"
 	}
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, nil, capability)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, &loadOverride{NumCtx: numCtx, NumGPU: numGPU}, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -213,12 +233,13 @@ func (s *InferenceService) GenerateStream(
 	prompt, system string,
 	images []string,
 	params engine.CompletionParams,
+	numCtx, numGPU *int,
 ) (<-chan engine.CompletionChunk, error) {
 	capability := "chat"
 	if len(images) > 0 {
 		capability = "vision"
 	}
-	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, nil, capability)
+	release, err := acquireLoadedModel(ctx, s.scheduler, s.engine, s.loader, model, &loadOverride{NumCtx: numCtx, NumGPU: numGPU}, capability)
 	if err != nil {
 		return nil, err
 	}
@@ -405,8 +426,8 @@ func toEngineParams(req *model.ChatCompletionRequest) engine.CompletionParams {
 	// families — gpt-oss emits OpenAI *harmony* channels, qwen/deepseek emit
 	// <think> — whose reasoning and tool calls only separate correctly under
 	// native parsing. Without it those markers leak raw into message.content.
-	// The engine falls back to the simple template path if native render fails,
-	// so models with no usable chat template still answer.
+	// A native rendering failure is reported to the caller so tool and reasoning
+	// semantics are never silently lost.
 	params.NativeChat = true
 	if len(req.Tools) > 0 {
 		if encoded, err := json.Marshal(req.Tools); err == nil {

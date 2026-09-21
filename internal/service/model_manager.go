@@ -80,8 +80,8 @@ type ModelManager struct {
 	activeLoadCtx   int
 	activeLoadGPU   int
 	pullMu          sync.Mutex
-	downloads          sync.Map // id -> *DownloadState
-	ollamaPulls        sync.Map // registry ref -> *ollamaPullState
+	downloads       sync.Map // id -> *DownloadState
+	ollamaPulls     sync.Map // registry ref -> *ollamaPullState
 }
 
 func NewModelManager(registry *storage.ModelRegistry, eng engine.Backend, modelsDir string) *ModelManager {
@@ -1034,13 +1034,19 @@ func (m *ModelManager) LoadModelWithContext(ctx context.Context, id string, opts
 		attempts = append(attempts, attempt.Options)
 	}
 	if m.scheduler != nil {
-		if _, err = m.scheduler.LoadModelAttempts(ctx, id, entry.FilePath, attempts); err == nil {
-			m.recordActiveLoad(opts)
-		}
+		_, err = m.scheduler.loadModelAttempts(ctx, id, entry.FilePath, attempts, func(_ engine.LoadOptions, loadErr error) {
+			if loadErr == nil {
+				m.recordActiveLoad(opts)
+			} else {
+				m.clearActiveLoad()
+			}
+		})
 		return err
 	}
 	if _, err = loadModelWithAttempts(ctx, m.engine, id, entry.FilePath, attempts); err == nil {
 		m.recordActiveLoad(opts)
+	} else {
+		m.clearActiveLoad()
 	}
 	return err
 }
@@ -1078,6 +1084,13 @@ func (m *ModelManager) activeLoadNeedsReload(numCtx, numGPU *int) bool {
 	return false
 }
 
+// LoadedProfileMatches is called only while the caller holds the scheduler's
+// inference slot. It compares requested values rather than the auto-fit result:
+// a memory retry must not cause identical requests to reload forever.
+func (m *ModelManager) LoadedProfileMatches(numCtx, numGPU *int) bool {
+	return !m.activeLoadNeedsReload(numCtx, numGPU)
+}
+
 func mmprojSize(path string) (int64, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -1110,11 +1123,7 @@ func (m *ModelManager) UnloadModel() {
 
 func (m *ModelManager) unloadCurrentModel(ctx context.Context) error {
 	if m.scheduler != nil {
-		err := m.scheduler.UnloadModel(ctx)
-		if err == nil {
-			m.clearActiveLoad()
-		}
-		return err
+		return m.scheduler.unloadModel(ctx, m.clearActiveLoad)
 	}
 	m.engine.UnloadModel()
 	m.clearActiveLoad()

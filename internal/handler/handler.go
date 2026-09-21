@@ -79,6 +79,10 @@ func runtimeHTTPStatus(err error) int {
 	if errors.As(err, &classified) {
 		return classified.HTTPStatus()
 	}
+	var rpcErr *rpc.Error
+	if errors.As(err, &rpcErr) && rpcErr.Code == engine.NativeChatUnavailableCode {
+		return http.StatusUnprocessableEntity
+	}
 	if errors.Is(err, context.Canceled) {
 		return 499
 	}
@@ -126,6 +130,10 @@ func runtimeErrorCode(err error) string {
 	}
 	if errors.As(err, &classified) {
 		return classified.Code()
+	}
+	var rpcErr *rpc.Error
+	if errors.As(err, &rpcErr) && rpcErr.Code == engine.NativeChatUnavailableCode {
+		return rpcErr.Code
 	}
 	if errors.Is(err, context.Canceled) {
 		return "request_cancelled"

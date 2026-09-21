@@ -107,7 +107,8 @@ extern "C" bridge_chat_parse_result bridge_chat_parse_native(
         const char * response,
         const char * parser,
         const char * generation_prompt,
-        int32_t format) {
+        int32_t format,
+        bool is_partial) {
     bridge_chat_parse_result result = {};
     if (response == nullptr) {
         result.error = chat_bridge_strdup("response is required");
@@ -123,7 +124,7 @@ extern "C" bridge_chat_parse_result bridge_chat_parse_native(
         if (parser != nullptr && parser[0] != '\0') {
             params.parser.load(parser);
         }
-        auto message = common_chat_parse(response, false, params);
+        auto message = common_chat_parse(response, is_partial, params);
         result.message_json = chat_bridge_strdup(message.to_json_oaicompat().dump());
         return result;
     } catch (const std::exception & error) {

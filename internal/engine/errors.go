@@ -2,6 +2,19 @@ package engine
 
 import "fmt"
 
+const NativeChatUnavailableCode = "native_chat_unavailable"
+
+// NativeChatUnavailableError keeps template failures distinguishable from
+// generation failures and prevents silently dropping tool/reasoning semantics.
+type NativeChatUnavailableError struct{ Cause error }
+
+func (e *NativeChatUnavailableError) Error() string {
+	return fmt.Sprintf("native chat template unavailable: %v", e.Cause)
+}
+func (e *NativeChatUnavailableError) Unwrap() error   { return e.Cause }
+func (e *NativeChatUnavailableError) Code() string    { return NativeChatUnavailableCode }
+func (e *NativeChatUnavailableError) HTTPStatus() int { return 422 }
+
 const ContextLengthExceededCode = "context_length_exceeded"
 
 type ContextLengthExceededError struct {

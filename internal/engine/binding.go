@@ -807,6 +807,16 @@ func RenderNativeChat(model *llamaModel, tmpl, messagesJSON, toolsJSON string, t
 }
 
 func ParseNativeChat(response string, render *NativeChatRender) (json.RawMessage, error) {
+	return parseNativeChat(response, render, false)
+}
+
+// ParseNativeChatPartial uses llama.cpp's incremental PEG parsing mode. The
+// result is a snapshot; callers emit only suffixes of stable parsed fields.
+func ParseNativeChatPartial(response string, render *NativeChatRender) (json.RawMessage, error) {
+	return parseNativeChat(response, render, true)
+}
+
+func parseNativeChat(response string, render *NativeChatRender, partial bool) (json.RawMessage, error) {
 	if render == nil {
 		return nil, fmt.Errorf("native chat parser parameters are required")
 	}
@@ -817,7 +827,7 @@ func ParseNativeChat(response string, render *NativeChatRender) (json.RawMessage
 	defer C.free(unsafe.Pointer(cParser))
 	defer C.free(unsafe.Pointer(cGenerationPrompt))
 
-	result := C.bridge_chat_parse_native(cResponse, cParser, cGenerationPrompt, C.int32_t(render.Format))
+	result := C.bridge_chat_parse_native(cResponse, cParser, cGenerationPrompt, C.int32_t(render.Format), C.bool(partial))
 	defer C.bridge_chat_parse_result_free(result)
 	if result.error != nil {
 		return nil, fmt.Errorf("native chat parse: %s", C.GoString(result.error))

@@ -14,6 +14,7 @@ import (
 
 	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/model"
+	"github.com/operium/orchestra-runtime/internal/rpc"
 	"github.com/operium/orchestra-runtime/internal/service"
 )
 
@@ -435,6 +436,8 @@ func TestRuntimeErrorStatusMapping(t *testing.T) {
 		{name: "typed overflow", err: engine.NewContextLengthExceededError(32801, 12032, true), want: http.StatusBadRequest},
 		{name: "timeout", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
 		{name: "cancelled", err: context.Canceled, want: 499},
+		{name: "native chat in process", err: &engine.NativeChatUnavailableError{Cause: fmt.Errorf("bad template")}, want: http.StatusUnprocessableEntity},
+		{name: "native chat worker", err: &rpc.Error{Code: engine.NativeChatUnavailableCode, Message: "bad template"}, want: http.StatusUnprocessableEntity},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -447,6 +450,9 @@ func TestRuntimeErrorStatusMapping(t *testing.T) {
 
 			if rec.Code != tc.want {
 				t.Fatalf("expected status %d, got %d: %s", tc.want, rec.Code, rec.Body.String())
+			}
+			if strings.HasPrefix(tc.name, "native chat") && !strings.Contains(rec.Body.String(), engine.NativeChatUnavailableCode) {
+				t.Fatalf("native chat code missing: %s", rec.Body.String())
 			}
 		})
 	}
@@ -862,6 +868,54 @@ func TestOpenAIChatStreamKeepsContentAndReasoningWithNativeToolCalls(t *testing.
 	if reason := chunks[3].Choices[0].FinishReason; reason == nil || *reason != "tool_calls" {
 		t.Fatalf("final chunk should finish with tool_calls: %s", dataLines[3])
 	}
+}
+
+func TestChatStreamsFinalNativeDeltasOnceWithoutTools(t *testing.T) {
+	backend := &fakeChatBackend{streamChunks: []engine.CompletionChunk{
+		{Reasoning: "think "},
+		{Text: "hel"},
+		{Done: true, Reasoning: "more", Text: "lo", FinishReason: "stop"},
+	}}
+	h := NewChatHandler(service.NewInferenceService(backend, 1))
+	t.Run("openai", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ChatCompletion(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"test","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var content, reasoning strings.Builder
+		for _, line := range openAISSEDataLines(t, rec.Body.String()) {
+			if line == "[DONE]" {
+				continue
+			}
+			var chunk model.OpenAIChatCompletionChunk
+			if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+				t.Fatal(err)
+			}
+			if value := chunk.Choices[0].Delta.Content; value != nil {
+				content.WriteString(*value)
+			}
+			reasoning.WriteString(chunk.Choices[0].Delta.ReasoningContent)
+		}
+		if content.String() != "hello" || reasoning.String() != "think more" {
+			t.Fatalf("content=%q reasoning=%q", content.String(), reasoning.String())
+		}
+	})
+	t.Run("ollama", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ChatOllama(rec, httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewBufferString(`{"model":"test","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var content, reasoning strings.Builder
+		for _, chunk := range decodeOllamaChatStream(t, rec.Body.Bytes()) {
+			content.WriteString(chunk.Message.Content)
+			reasoning.WriteString(chunk.Message.Thinking)
+		}
+		if content.String() != "hello" || reasoning.String() != "think more" {
+			t.Fatalf("content=%q reasoning=%q", content.String(), reasoning.String())
+		}
+	})
 }
 
 func TestOllamaChatKeepsContentAndThinkingWithNativeToolCalls(t *testing.T) {

@@ -149,12 +149,22 @@ func (s *RuntimeScheduler) LoadModel(ctx context.Context, modelID, path string, 
 // LoadModelAttempts holds the lifecycle slot for the complete adaptive load.
 // No inference or competing model switch can run between OOM retries.
 func (s *RuntimeScheduler) LoadModelAttempts(ctx context.Context, modelID, path string, attempts []engine.LoadOptions) (engine.LoadOptions, error) {
+	return s.loadModelAttempts(ctx, modelID, path, attempts, nil)
+}
+
+// onComplete runs while the lifecycle slot is held, so load bookkeeping is
+// published before another request can acquire the context.
+func (s *RuntimeScheduler) loadModelAttempts(ctx context.Context, modelID, path string, attempts []engine.LoadOptions, onComplete func(engine.LoadOptions, error)) (engine.LoadOptions, error) {
 	release, err := s.acquireFor(ctx, engine.StateLoading, modelID)
 	if err != nil {
 		return engine.LoadOptions{}, err
 	}
 	defer release()
-	return loadModelWithAttempts(ctx, s.engine, modelID, path, attempts)
+	selected, err := loadModelWithAttempts(ctx, s.engine, modelID, path, attempts)
+	if onComplete != nil {
+		onComplete(selected, err)
+	}
+	return selected, err
 }
 
 func loadModelWithAttempts(ctx context.Context, backend engine.Backend, modelID, path string, attempts []engine.LoadOptions) (engine.LoadOptions, error) {
@@ -221,12 +231,19 @@ func isRetryableMemoryLoadError(err error) bool {
 }
 
 func (s *RuntimeScheduler) UnloadModel(ctx context.Context) error {
+	return s.unloadModel(ctx, nil)
+}
+
+func (s *RuntimeScheduler) unloadModel(ctx context.Context, onComplete func()) error {
 	release, err := s.acquireFor(ctx, engine.StateUnloading, s.engine.LoadedModelID())
 	if err != nil {
 		return err
 	}
 	defer release()
 	s.engine.UnloadModel()
+	if onComplete != nil {
+		onComplete()
+	}
 	return nil
 }
 

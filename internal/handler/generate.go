@@ -105,7 +105,7 @@ func (h *GenerateHandler) handleCompletion(
 	prompt string,
 	params engine.CompletionParams,
 ) {
-	result, err := h.inference.Generate(r.Context(), req.Model, prompt, "", nil, params)
+	result, err := h.inference.Generate(r.Context(), req.Model, prompt, "", nil, params, nil, nil)
 	if err != nil {
 		slog.Error("completion failed", "error", err)
 		writeRuntimeError(w, err)
@@ -145,7 +145,7 @@ func (h *GenerateHandler) handleCompletionStream(
 		return
 	}
 
-	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, "", nil, params)
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, "", nil, params, nil, nil)
 	if err != nil {
 		slog.Error("completion stream failed", "error", err)
 		writeRuntimeError(w, err)
@@ -207,7 +207,8 @@ func (h *GenerateHandler) handleComplete(
 	} else if ok {
 		system = appendInstruction(system, instruction)
 	}
-	result, err := h.inference.Generate(r.Context(), req.Model, prompt, system, req.Images, params)
+	numCtx, numGPU := generateLoadOverrides(req)
+	result, err := h.inference.Generate(r.Context(), req.Model, prompt, system, req.Images, params, numCtx, numGPU)
 	if err != nil {
 		slog.Error("generate failed", "error", err)
 		writeRuntimeError(w, err)
@@ -245,7 +246,8 @@ func (h *GenerateHandler) handleStream(
 		return
 	}
 
-	ch, err := h.inference.GenerateStream(r.Context(), req.Model, req.Prompt, req.System, req.Images, params)
+	numCtx, numGPU := generateLoadOverrides(req)
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, req.Prompt, req.System, req.Images, params, numCtx, numGPU)
 	if err != nil {
 		slog.Error("generate stream failed", "error", err)
 		writeRuntimeError(w, err)
@@ -315,7 +317,8 @@ func (h *GenerateHandler) handleBufferedStream(
 		system = appendInstruction(system, instruction)
 	}
 
-	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, system, req.Images, params)
+	numCtx, numGPU := generateLoadOverrides(req)
+	ch, err := h.inference.GenerateStream(r.Context(), req.Model, prompt, system, req.Images, params, numCtx, numGPU)
 	if err != nil {
 		slog.Error("generate buffered stream failed", "error", err)
 		writeRuntimeError(w, err)
@@ -381,6 +384,13 @@ func writeOllamaGenerateStreamResponse(w http.ResponseWriter, flusher http.Flush
 		fmt.Fprintf(w, "%s\n", data)
 		flusher.Flush()
 	}
+}
+
+func generateLoadOverrides(req *model.GenerateRequest) (*int, *int) {
+	if req.Options == nil {
+		return nil, nil
+	}
+	return req.Options.NumCtx, req.Options.NumGPU
 }
 
 // toEngineParamsFromGenerate maps /api/generate's nested options → engine params.

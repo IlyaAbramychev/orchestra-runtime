@@ -124,7 +124,8 @@ bridge_chat_parse_result bridge_chat_parse_native(
     const char *response,
     const char *parser,
     const char *generation_prompt,
-    int32_t format
+    int32_t format,
+    bool is_partial
 );
 void bridge_chat_parse_result_free(bridge_chat_parse_result result);
 

@@ -1,10 +1,22 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/operium/orchestra-runtime/internal/engine"
 	"github.com/operium/orchestra-runtime/internal/rpc"
 )
+
+func TestInferenceErrorCodePreservesNativeChatFailure(t *testing.T) {
+	err := &engine.NativeChatUnavailableError{Cause: fmt.Errorf("invalid Jinja template")}
+	if got := inferenceErrorCode(err); got != engine.NativeChatUnavailableCode {
+		t.Fatalf("code=%q", got)
+	}
+	if got := inferenceErrorCode(fmt.Errorf("decode failed")); got != rpc.ErrCodeInference {
+		t.Fatalf("generic code=%q", got)
+	}
+}
 
 func TestToEngineParamsPreservesChatTemplate(t *testing.T) {
 	got := toEngineParams(rpc.CompletionParams{ChatTemplate: "{{ custom_template }}"})

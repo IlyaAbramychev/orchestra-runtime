@@ -289,7 +289,7 @@ func (w *worker) handleComplete(ctx context.Context, c *rpc.Codec, env *rpc.Enve
 
 	result, err := w.engine.Complete(callCtx, msgs, params)
 	if err != nil {
-		_ = c.Write(finalErr(env.ID, rpc.ErrCodeInference, err.Error()))
+		_ = c.Write(finalErr(env.ID, inferenceErrorCode(err), err.Error()))
 		return
 	}
 	_ = c.Write(finalOK(env.ID, rpc.CompleteResult{
@@ -331,12 +331,12 @@ func (w *worker) handleCompleteStream(ctx context.Context, c *rpc.Codec, env *rp
 
 	ch, err := w.engine.CompleteStream(callCtx, msgs, params)
 	if err != nil {
-		_ = c.Write(finalErr(env.ID, rpc.ErrCodeInference, err.Error()))
+		_ = c.Write(finalErr(env.ID, inferenceErrorCode(err), err.Error()))
 		return
 	}
 	for chunk := range ch {
 		if chunk.Err != nil {
-			_ = c.Write(finalErr(env.ID, rpc.ErrCodeInference, chunk.Err.Error()))
+			_ = c.Write(finalErr(env.ID, inferenceErrorCode(chunk.Err), chunk.Err.Error()))
 			return
 		}
 		payload := rpc.StreamChunk{
@@ -392,6 +392,14 @@ func (w *worker) handleEmbed(ctx context.Context, c *rpc.Codec, env *rpc.Envelop
 func finalOK(id string, payload any) *rpc.Envelope {
 	raw, _ := json.Marshal(payload)
 	return &rpc.Envelope{ID: id, Kind: rpc.KindFinal, Result: raw}
+}
+
+func inferenceErrorCode(err error) string {
+	var unavailable *engine.NativeChatUnavailableError
+	if errors.As(err, &unavailable) {
+		return unavailable.Code()
+	}
+	return rpc.ErrCodeInference
 }
 
 func finalErr(id, code, msg string) *rpc.Envelope {

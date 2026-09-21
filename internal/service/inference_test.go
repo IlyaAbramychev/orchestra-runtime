@@ -156,6 +156,114 @@ func TestInferenceNeverRunsAgainstModelSwitchedAfterAutoLoad(t *testing.T) {
 	}
 }
 
+type switchingProfileLoader struct {
+	scheduler   *RuntimeScheduler
+	context     int
+	attempts    int
+	switchEvery bool
+}
+
+func (l *switchingProfileLoader) ResolveModelID(model string) (string, error) { return model, nil }
+func (l *switchingProfileLoader) DefaultsForModel(string) (ModelRequestDefaults, error) {
+	return ModelRequestDefaults{}, nil
+}
+func (l *switchingProfileLoader) EnsureLoadedForCapabilities(ctx context.Context, model string, caps []string) error {
+	return l.EnsureLoadedWithOverrides(ctx, model, caps, nil, nil)
+}
+func (l *switchingProfileLoader) EnsureLoadedWithOverrides(ctx context.Context, _ string, _ []string, numCtx, _ *int) error {
+	l.attempts++
+	if numCtx != nil {
+		l.context = *numCtx
+	}
+	if l.attempts == 1 || l.switchEvery {
+		// Another load of the same model wins the slot after EnsureLoaded.
+		release, err := l.scheduler.acquireFor(ctx, engine.StateLoading, "test")
+		if err != nil {
+			return err
+		}
+		l.context = 8192
+		release()
+	}
+	return nil
+}
+
+func TestInferenceStopsWhenProfileKeepsChanging(t *testing.T) {
+	backend := &fakeBackend{}
+	svc := NewInferenceService(backend, 2)
+	loader := &switchingProfileLoader{scheduler: svc.scheduler, switchEvery: true}
+	svc.SetModelLoader(loader)
+	requested := 4096
+	_, err := svc.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model: "test", NumCtx: &requested,
+		Messages: []model.ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed before inference") || loader.attempts != 4 {
+		t.Fatalf("expected bounded retry after four profile switches, attempts=%d err=%v", loader.attempts, err)
+	}
+}
+func (l *switchingProfileLoader) LoadedProfileMatches(numCtx, _ *int) bool {
+	return numCtx == nil || l.context == *numCtx
+}
+
+func TestInferenceRechecksRequestedProfileInsideSchedulerSlot(t *testing.T) {
+	backend := &fakeBackend{}
+	svc := NewInferenceService(backend, 2)
+	loader := &switchingProfileLoader{scheduler: svc.scheduler}
+	svc.SetModelLoader(loader)
+	requested := 4096
+	_, err := svc.Complete(context.Background(), &model.ChatCompletionRequest{
+		Model: "test", NumCtx: &requested,
+		Messages: []model.ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loader.attempts != 2 || loader.context != requested {
+		t.Fatalf("inference used context %d after %d loads; want %d after 2", loader.context, loader.attempts, requested)
+	}
+}
+
+func TestLoadBookkeepingIsPublishedBeforeSchedulerRelease(t *testing.T) {
+	backend := &fakeBackend{}
+	scheduler := NewRuntimeScheduler(backend, 2)
+	opts := engine.DefaultLoadOptions()
+	published := false
+	_, err := scheduler.loadModelAttempts(context.Background(), "test", "/tmp/model.gguf", []engine.LoadOptions{opts}, func(_ engine.LoadOptions, err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		published = true
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		if _, err := scheduler.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("slot became available before bookkeeping: %v", err)
+		}
+	})
+	if err != nil || !published {
+		t.Fatalf("load err=%v published=%v", err, published)
+	}
+}
+
+func TestActiveLoadMatchesRequestedProfileAfterAutoFit(t *testing.T) {
+	manager := &ModelManager{}
+	requested := engine.DefaultLoadOptions()
+	requested.CtxSize = 4096
+	requested.GPULayers = 0
+	manager.recordActiveLoad(requested)
+	ctx, gpu := 4096, 0
+	if !manager.LoadedProfileMatches(&ctx, &gpu) || !manager.LoadedProfileMatches(nil, nil) {
+		t.Fatal("requested and unspecified profiles should reuse the current load")
+	}
+	ctx = 8192
+	if manager.LoadedProfileMatches(&ctx, nil) {
+		t.Fatal("different context must reload")
+	}
+	manager.clearActiveLoad()
+	if manager.LoadedProfileMatches(nil, nil) {
+		t.Fatal("unloaded model must not retain its profile")
+	}
+}
+
 func TestToEngineMessagesPreservesOpenAIToolHistory(t *testing.T) {
 	var request model.ChatCompletionRequest
 	err := json.Unmarshal([]byte(`{

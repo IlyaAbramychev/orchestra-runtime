@@ -186,15 +186,7 @@ func (e *Engine) Complete(ctx context.Context, messages []ChatMessage, params Co
 	} else if params.NativeChat {
 		prompt, nativeRender, err = e.buildNativePrompt(promptMessages, &params)
 		if err != nil {
-			// Degrade to the simple template path so a model with a missing or
-			// unparseable chat template still answers. Native reasoning/tool
-			// parsing is unavailable for it (nativeRender stays nil).
-			slog.Warn("native chat prompt failed; using simple template", "error", err)
-			nativeRender = nil
-			prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
-			if err != nil {
-				return nil, fmt.Errorf("build prompt: %w", err)
-			}
+			return nil, &NativeChatUnavailableError{Cause: err}
 		}
 	} else {
 		prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
@@ -338,15 +330,8 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 	} else if params.NativeChat {
 		prompt, nativeRender, err = e.buildNativePrompt(promptMessages, &params)
 		if err != nil {
-			// Degrade to the simple template path (see Complete). nativeRender
-			// stays nil, so native reasoning/tool parsing is skipped.
-			slog.Warn("native chat prompt failed; using simple template", "error", err)
-			nativeRender = nil
-			prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
-			if err != nil {
-				e.mu.Unlock()
-				return nil, fmt.Errorf("build prompt: %w", err)
-			}
+			e.mu.Unlock()
+			return nil, &NativeChatUnavailableError{Cause: err}
 		}
 	} else {
 		prompt, err = e.buildPrompt(promptMessages, params.ChatTemplate)
@@ -362,6 +347,12 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 	}
 
 	ch := make(chan CompletionChunk, 32)
+	send := func(chunk CompletionChunk) {
+		select {
+		case ch <- chunk:
+		case <-ctx.Done():
+		}
+	}
 
 	go func() {
 		defer e.mu.Unlock()
@@ -375,7 +366,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		// surface it through the stream instead.
 		defer func() {
 			if r := recover(); r != nil {
-				ch <- CompletionChunk{Err: fmt.Errorf("inference panic: %v", r)}
+				send(CompletionChunk{Err: fmt.Errorf("inference panic: %v", r)})
 			}
 		}()
 
@@ -389,7 +380,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		defer batch.Free()
 		nPrompt, sampleIdx, err := e.prefillPrompt(ctx, batch, prompt, images)
 		if err != nil {
-			ch <- CompletionChunk{Err: err}
+			send(CompletionChunk{Err: err})
 			return
 		}
 		promptEvalNs := time.Since(promptStart).Nanoseconds()
@@ -398,7 +389,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		// Guard: llama.cpp SIGSEGVs on batch decode when position >= n_ctx,
 		// which kills the whole process (seen as "terminated" on the HTTP side).
 		if nPrompt >= nCtx {
-			ch <- CompletionChunk{Err: NewContextLengthExceededError(nPrompt, nCtx, true, maxTokens)}
+			send(CompletionChunk{Err: NewContextLengthExceededError(nPrompt, nCtx, true, maxTokens)})
 			return
 		}
 		// Leave 1 slot so we never hit pos == n_ctx during sampling.
@@ -408,7 +399,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 
 		sampler, err := e.createSampler(params)
 		if err != nil {
-			ch <- CompletionChunk{Err: err}
+			send(CompletionChunk{Err: err})
 			return
 		}
 		defer sampler.Free()
@@ -416,15 +407,41 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		// Generation loop (measure: eval duration)
 		evalStart := time.Now()
 		var nativeOutput strings.Builder
+		var nativeSentContent, nativeSentReasoning string
+		toolsActive := params.ToolsJSON != ""
+		emitParsed := func(content, reasoning string) {
+			// A partial PEG snapshot can lag while a channel delimiter is being
+			// generated. Only publish monotonic suffixes; final parsing remains
+			// authoritative and never repeats a previously sent delta.
+			if strings.HasPrefix(reasoning, nativeSentReasoning) && len(reasoning) > len(nativeSentReasoning) {
+				send(CompletionChunk{Reasoning: reasoning[len(nativeSentReasoning):]})
+				nativeSentReasoning = reasoning
+			}
+			if strings.HasPrefix(content, nativeSentContent) && len(content) > len(nativeSentContent) {
+				send(CompletionChunk{Text: content[len(nativeSentContent):]})
+				nativeSentContent = content
+			}
+		}
 		emit := func(value string) {
 			if value == "" {
 				return
 			}
 			if nativeRender != nil {
 				nativeOutput.WriteString(value)
+				if !toolsActive {
+					if messageJSON, err := ParseNativeChatPartial(nativeOutput.String(), nativeRender); err == nil {
+						var parsed nativeParsedMessage
+						if json.Unmarshal(messageJSON, &parsed) == nil && len(parsed.ToolCalls) == 0 {
+							if parsed.ReasoningContent == "" {
+								parsed.Content, parsed.ReasoningContent = splitReasoningContent(parsed.Content)
+							}
+							emitParsed(parsed.Content, parsed.ReasoningContent)
+						}
+					}
+				}
 				return
 			}
-			ch <- CompletionChunk{Text: value}
+			send(CompletionChunk{Text: value})
 		}
 		finalize := func(reason string, nGen int) CompletionChunk {
 			chunk := CompletionChunk{
@@ -442,9 +459,13 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 			}
 			if nativeRender != nil {
 				result := &CompletionResult{Text: nativeOutput.String(), FinishReason: reason}
-				e.applyNativeResult(result, nativeOutput.String(), nativeRender, params.ToolsJSON != "")
-				chunk.Text = result.Text
-				chunk.Reasoning = result.Reasoning
+				e.applyNativeResult(result, nativeOutput.String(), nativeRender, toolsActive)
+				if strings.HasPrefix(result.Text, nativeSentContent) {
+					chunk.Text = result.Text[len(nativeSentContent):]
+				}
+				if strings.HasPrefix(result.Reasoning, nativeSentReasoning) {
+					chunk.Reasoning = result.Reasoning[len(nativeSentReasoning):]
+				}
 				chunk.ToolCalls = result.ToolCalls
 				chunk.FinishReason = result.FinishReason
 			}
@@ -466,7 +487,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 				if out := stopFilter.Flush(); out != "" {
 					emit(out)
 				}
-				ch <- finalize("stop", nGen)
+				send(finalize("stop", nGen))
 				return
 			}
 
@@ -482,7 +503,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 				if out := stopFilter.Flush(); out != "" {
 					emit(out)
 				}
-				ch <- finalize("stop", nGen)
+				send(finalize("stop", nGen))
 				return
 			}
 
@@ -499,20 +520,20 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 					emit(out)
 				}
 				if stopped {
-					ch <- finalize("stop", nGen)
+					send(finalize("stop", nGen))
 					return
 				}
 			}
 
 			batch.Clear()
 			if err := batch.Add(token, pos, 0, true); err != nil {
-				ch <- CompletionChunk{Err: err}
+				send(CompletionChunk{Err: err})
 				return
 			}
 			pos++
 
 			if err := llamaDecode(e.ctx, batch); err != nil {
-				ch <- CompletionChunk{Err: fmt.Errorf("decode token %d: %w", nGen, err)}
+				send(CompletionChunk{Err: fmt.Errorf("decode token %d: %w", nGen, err)})
 				return
 			}
 			sampleIdx = batch.NTokens() - 1
@@ -527,7 +548,7 @@ func (e *Engine) CompleteStream(ctx context.Context, messages []ChatMessage, par
 		if out := stopFilter.Flush(); out != "" {
 			emit(out)
 		}
-		ch <- finalize("length", nGen)
+		send(finalize("length", nGen))
 	}()
 
 	return ch, nil
@@ -810,15 +831,23 @@ func marshalNativeMessages(messages []ChatMessage) ([]byte, error) {
 func (e *Engine) applyNativeResult(result *CompletionResult, raw string, render *NativeChatRender, toolsActive bool) {
 	messageJSON, err := ParseNativeChat(raw, render)
 	if err != nil {
+		result.Text = ""
+		result.Reasoning = ""
 		if toolsActive {
 			result.FinishReason = "tool_protocol_error"
+		} else {
+			result.FinishReason = "chat_protocol_error"
 		}
 		return
 	}
 	var parsed nativeParsedMessage
 	if err := json.Unmarshal(messageJSON, &parsed); err != nil {
+		result.Text = ""
+		result.Reasoning = ""
 		if toolsActive {
 			result.FinishReason = "tool_protocol_error"
+		} else {
+			result.FinishReason = "chat_protocol_error"
 		}
 		return
 	}
@@ -831,7 +860,7 @@ func (e *Engine) applyNativeResult(result *CompletionResult, raw string, render 
 	for _, call := range parsed.ToolCalls {
 		arguments, valid := normalizeToolArguments(call.Function.Arguments)
 		if strings.TrimSpace(call.Function.Name) == "" || !valid {
-			result.Text = raw
+			result.Text = ""
 			result.ToolCalls = nil
 			result.FinishReason = "tool_protocol_error"
 			return
@@ -845,7 +874,7 @@ func (e *Engine) applyNativeResult(result *CompletionResult, raw string, render 
 	if len(result.ToolCalls) > 0 {
 		result.FinishReason = "tool_calls"
 	} else if toolsActive && looksLikeToolProtocol(raw) {
-		result.Text = raw
+		result.Text = ""
 		result.FinishReason = "tool_protocol_error"
 	}
 }

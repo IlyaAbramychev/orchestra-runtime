@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,62 @@ import (
 	"github.com/operium/orchestra-runtime/internal/model"
 	"github.com/operium/orchestra-runtime/internal/service"
 )
+
+type generateOverrideLoader struct {
+	ctx, gpu     *int
+	capabilities []string
+}
+
+func (l *generateOverrideLoader) ResolveModelID(string) (string, error) { return "test", nil }
+func (l *generateOverrideLoader) DefaultsForModel(string) (service.ModelRequestDefaults, error) {
+	return service.ModelRequestDefaults{}, nil
+}
+func (l *generateOverrideLoader) EnsureLoadedForCapabilities(_ context.Context, _ string, caps []string) error {
+	l.capabilities = caps
+	return nil
+}
+func (l *generateOverrideLoader) EnsureLoadedWithOverrides(_ context.Context, _ string, caps []string, ctx, gpu *int) error {
+	l.capabilities, l.ctx, l.gpu = caps, ctx, gpu
+	return nil
+}
+func (l *generateOverrideLoader) LoadedProfileMatches(ctx, gpu *int) bool {
+	return l.ctx == ctx && l.gpu == gpu
+}
+
+func TestGenerateAppliesLoadOptionsInEveryMode(t *testing.T) {
+	cases := []struct {
+		name, extra, capability string
+		stream                  bool
+	}{
+		{"raw", "", "chat", false},
+		{"structured", `,"format":"json"`, "chat", false},
+		{"vision", `,"images":["aGVsbG8="]`, "vision", false},
+		{"stream", "", "chat", true},
+		{"buffered-stream", `,"format":"json"`, "chat", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &fakeChatBackend{completeText: `{}`,
+				streamChunks: []engine.CompletionChunk{{Text: `{}`}, {Done: true, FinishReason: "stop"}}}
+			loader := &generateOverrideLoader{}
+			inf := service.NewInferenceService(backend, 2)
+			inf.SetModelLoader(loader)
+			h := NewGenerateHandler(inf)
+			body := fmt.Sprintf(`{"model":"test","prompt":"hi","stream":%t,"options":{"num_ctx":4096,"num_gpu":0}%s}`, tc.stream, tc.extra)
+			rec := httptest.NewRecorder()
+			h.Generate(rec, httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewBufferString(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if loader.ctx == nil || *loader.ctx != 4096 || loader.gpu == nil || *loader.gpu != 0 {
+				t.Fatalf("load overrides ctx=%v gpu=%v", loader.ctx, loader.gpu)
+			}
+			if len(loader.capabilities) != 1 || loader.capabilities[0] != tc.capability {
+				t.Fatalf("capabilities=%v", loader.capabilities)
+			}
+		})
+	}
+}
 
 func TestGenerateRejectsUnsupportedFields(t *testing.T) {
 	h := NewGenerateHandler(service.NewInferenceService(&fakeChatBackend{}, 1))
