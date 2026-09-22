@@ -1,12 +1,95 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNativeVisionCompletionIntegration(t *testing.T) {
+	path, projector := os.Getenv("ORCHESTRA_TEST_VISION_MODEL_PATH"), os.Getenv("ORCHESTRA_TEST_VISION_MMPROJ_PATH")
+	if path == "" || projector == "" {
+		t.Skip("set vision model and projector paths for real multimodal prefill regression")
+	}
+	eng := New()
+	eng.InitBackend()
+	defer eng.Close()
+	opts := DefaultLoadOptions()
+	opts.CtxSize = 4096
+	opts.MMProjPath = projector
+	if err := eng.LoadModel("vision-prefill-fixture", path, opts); err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 256, 256))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 255, A: 255}}, image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	messages := []ChatMessage{{Role: "user", Content: "Name the image's dominant color in one English word.", Images: []string{base64.StdEncoding.EncodeToString(buf.Bytes())}}}
+	params := DefaultCompletionParams()
+	params.NativeChat, params.ThinkingSet, params.EnableThinking = true, true, false
+	params.MaxTokens, params.Temperature = 64, 0
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	result, err := eng.Complete(ctx, messages, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(result.Text), "red") {
+		t.Fatalf("unexpected vision result: %+v", result)
+	}
+	stream, err := eng.CompleteStream(ctx, messages, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	for chunk := range stream {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+		text.WriteString(chunk.Text)
+	}
+	if !strings.Contains(strings.ToLower(text.String()), "red") {
+		t.Fatalf("unexpected vision stream: %q", text.String())
+	}
+}
+
+func TestNativeVisionMarkerIntegration(t *testing.T) {
+	path := os.Getenv("ORCHESTRA_TEST_VISION_MODEL_PATH")
+	if path == "" {
+		t.Skip("set ORCHESTRA_TEST_VISION_MODEL_PATH for native vision marker regression")
+	}
+	eng := New()
+	eng.InitBackend()
+	defer eng.Close()
+	if err := eng.LoadModel("vision-marker-fixture", path, LoadOptions{CtxSize: 2048, GPULayers: -1, UseMmap: true}); err != nil {
+		t.Fatal(err)
+	}
+	messages := withMediaMarkers([]ChatMessage{{Role: "user", Parts: []ContentPart{
+		{Type: "text", Text: "Inspect panels"}, {Type: "image_url", ImageURL: "aGVsbG8="},
+	}}})
+	params := DefaultCompletionParams()
+	params.NativeChat = true
+	params.ThinkingSet = true
+	params.EnableThinking = false
+	prompt, _, err := eng.buildNativePrompt(messages, &params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(prompt, mtmdDefaultMarker()) != 1 {
+		t.Fatalf("native prompt lost media marker: messages=%+v prompt=%q", messages, prompt)
+	}
+}
 
 func TestNativeChatStreamingIntegration(t *testing.T) {
 	modelPath := os.Getenv("ORCHESTRA_TEST_TOOL_MODEL_PATH")

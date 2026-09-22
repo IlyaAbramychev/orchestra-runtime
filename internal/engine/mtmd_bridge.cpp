@@ -91,11 +91,14 @@ extern "C" bridge_mtmd_eval_result bridge_mtmd_eval_prompt(
             return result;
         }
 
-        mtmd_input_text text {
-            /* .text          = */ prompt,
-            /* .add_special   = */ add_special,
-            /* .parse_special = */ parse_special,
-        };
+        // Assign by name: upstream inserted text_len between text and the
+        // flags. Positional initialization silently converted add_special to
+        // a one-byte length, hiding every media marker from the tokenizer.
+        mtmd_input_text text = {};
+        text.text = prompt;
+        text.text_len = std::strlen(prompt);
+        text.add_special = add_special;
+        text.parse_special = parse_special;
 
         int32_t tokenize_ret = mtmd_tokenize(
             mtmd,
