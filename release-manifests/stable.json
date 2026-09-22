@@ -1,22 +1,22 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "releasedAt": "2026-07-10T07:29:41.682Z",
-  "runtimeVersion": "0.4.0",
+  "releasedAt": "2026-09-22T10:15:16.314Z",
+  "runtimeVersion": "0.5.0",
   "minExtensionVersion": "0.2.13",
   "maxExtensionVersion": "0.x",
   "critical": false,
-  "notes": "Runtime 0.4.0: VLM-first loading, atomic host/worker protocol handshake, native llama.cpp tools, strict tool schemas, and controllable thinking.",
+  "notes": "Runtime 0.5.0: fixed VLM prefill, adaptive loading, per-request load profiles and native reasoning/tool reliability. Install matching host and worker.",
   "artifacts": [
     {
       "platform": "darwin",
       "arch": "arm64",
-      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.4.0/orchestra-runtime-darwin-arm64",
-      "sha256": "937be4327018d3e75220f37c9f7933b9b3aa7004888546803cc2f30698fd2f6b",
-      "size": 15236914,
-      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.4.0/orchestra-worker-darwin-arm64",
-      "workerSha256": "d4076ddeee6a35dbaed0c2a8ab90a0bfc755577f92507cfc4e8fd1df63bc2818",
-      "workerSize": 10237298
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.0/orchestra-runtime-darwin-arm64",
+      "sha256": "ceacc0098c37f54487211dc649b885d19a770cbcf3ae9acc9e5797fa754e9041",
+      "size": 15878402,
+      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.0/orchestra-worker-darwin-arm64",
+      "workerSha256": "8b8db4fc74c34e22aad6ba18085492ae56168dcb4b7fc93b132c43472c0c123c",
+      "workerSize": 10812690
     }
   ]
 }

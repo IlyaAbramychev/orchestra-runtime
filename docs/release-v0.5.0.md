@@ -17,7 +17,7 @@ This release focuses on local VLM correctness and reliable agent inference. The 
 - Real Qwen3.5-9B-Q4_K_M + BF16 projector: buffered and streamed vision checks passed.
 - Desktop integration: three runs on Runtime and three on Ollama, using the same GGUF/projector and an 8192 context. Both image → tool → answer and local description → text-only request → tool → answer passed in every run.
 
-These are narrow smoke tests on one synthetic image, not a universal VLM quality or performance benchmark. The text-only request used the same model without pixels. See [the detailed evaluation](vlm-eval-2026-09-22.md) for hashes, setup and limitations.
+These are narrow smoke tests on one synthetic image, not a universal VLM quality or performance benchmark. The text-only request used the same model without pixels. See [the detailed evaluation](https://github.com/IlyaAbramychev/orchestra-runtime/blob/v0.5.0/docs/vlm-eval-2026-09-22.md) for hashes, setup and limitations.
 
 ## Distribution
 
