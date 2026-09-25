@@ -1,20 +1,33 @@
 name: Release
 
-# Trigger: push a tag like `v0.2.0` → builds required-platform binaries in
-# parallel, attaches them to the GitHub Release by that tag. The Operium
-# Orchestra VS Code extension polls /releases/latest and pulls assets by
-# exact name.
+# Trigger: push a tag like `v0.2.0` → builds every platform binary in
+# parallel, attaches them to the GitHub Release by that tag. Operium Desktop
+# and the Operium Orchestra VS Code extension pick assets by the names below
+# (via release-manifests/<channel>.json, see runtime-channel-manifest.yml).
 #
-# Required (this workflow, must both succeed or no release):
-#   orchestra-runtime-darwin-arm64    Apple Silicon, Metal + Accelerate
-#   + orchestra-worker-darwin-arm64 for subprocess mode
+# Required (all must succeed or no release):
+#   orchestra-runtime-darwin-arm64     Apple Silicon, Metal + Accelerate
+#   orchestra-runtime-linux-x64        CPU (AVX2 baseline), glibc >= 2.35
+#   orchestra-runtime-linux-arm64      CPU (armv8 baseline), glibc >= 2.35
+#   orchestra-runtime-win32-x64.exe    CPU (AVX2 baseline), MinGW static link
+#   + the matching orchestra-worker-* binary for subprocess mode
 #
-# Best-effort (separate workflow — see release-extras.yml): Intel Mac, Win32.
+# Pull requests that touch the build run the same matrix without publishing,
+# so a broken platform is caught before tagging.
 
 on:
   push:
     tags:
       - "v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - "Makefile"
+      - "llama.cpp"
+      - "cmd/**"
+      - "internal/engine/**"
+      - "internal/supervisor/**"
   # Allow manual dispatch for dry-runs without tagging.
   workflow_dispatch:
     inputs:
@@ -30,13 +43,10 @@ permissions:
   contents: write  # needed to create/update a Release and upload assets
 
 jobs:
-  # Required platform: release WILL NOT publish unless Apple Silicon succeeds.
-  # Why only two: Intel macOS runner availability on GitHub is terrible (runs
-  # sit queued for hours; release job can't proceed until they finish even
-  # with continue-on-error because `needs: build` waits for completion, not
-  # success). Windows+MinGW+llama.cpp is historically flaky. Both those
-  # platforms live in `release-extras.yml` and attach to the same release
-  # after it's cut — if they fail, the release still ships with core assets.
+  # Release WILL NOT publish unless every platform below succeeds. CPU builds
+  # disable GGML_NATIVE so the binary runs on any machine with the listed
+  # baseline instead of only on the runner's CPU, and disable OpenMP so no
+  # libgomp runtime has to be installed on the user's machine.
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -47,8 +57,31 @@ jobs:
           - name: darwin-arm64
             runner: macos-14
             make_target: build-metal
+            cmake_extra: ""
+            ext: ""
             artifact: orchestra-runtime-darwin-arm64
             worker_artifact: orchestra-worker-darwin-arm64
+          - name: linux-x64
+            runner: ubuntu-22.04
+            make_target: build-cpu
+            cmake_extra: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON"
+            ext: ""
+            artifact: orchestra-runtime-linux-x64
+            worker_artifact: orchestra-worker-linux-x64
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            make_target: build-cpu
+            cmake_extra: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF"
+            ext: ""
+            artifact: orchestra-runtime-linux-arm64
+            worker_artifact: orchestra-worker-linux-arm64
+          - name: win32-x64
+            runner: windows-2022
+            make_target: build-cpu
+            cmake_extra: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON"
+            ext: ".exe"
+            artifact: orchestra-runtime-win32-x64.exe
+            worker_artifact: orchestra-worker-win32-x64.exe
 
     steps:
       - name: Checkout (with llama.cpp submodule)
@@ -67,10 +100,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # libcurl is only strictly needed if LLAMA_CURL=ON in cmake; our
-          # Makefile sets it OFF, but install anyway so local `make` from
-          # the same VM works for contributors who flip the flag.
-          sudo apt-get install -y cmake build-essential libcurl4-openssl-dev
+          sudo apt-get install -y cmake build-essential
 
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
@@ -78,6 +108,21 @@ jobs:
           # cmake + clang already preinstalled on GitHub runners;
           # this is a no-op guard so the step is explicit.
           cmake --version
+
+      # cgo needs gcc, so Windows builds use MinGW-w64 (UCRT) from MSYS2
+      # rather than MSVC. path-type inherit keeps setup-go's `go` on PATH.
+      - name: Install build deps (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
 
       - name: Derive version
         id: ver
@@ -92,12 +137,36 @@ jobs:
           fi
 
       - name: Build
-        run: make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }}
+        if: runner.os != 'Windows'
+        run: make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }} LLAMA_CMAKE_EXTRA="${{ matrix.cmake_extra }}"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: make ${{ matrix.make_target }} VERSION=${{ steps.ver.outputs.version }} LLAMA_CMAKE_EXTRA="${{ matrix.cmake_extra }}"
 
       - name: Rename binaries for release
+        shell: bash
         run: |
-          cp bin/orchestra-runtime bin/${{ matrix.artifact }}
-          cp bin/orchestra-worker  bin/${{ matrix.worker_artifact }}
+          cp bin/orchestra-runtime${{ matrix.ext }} bin/${{ matrix.artifact }}
+          cp bin/orchestra-worker${{ matrix.ext }}  bin/${{ matrix.worker_artifact }}
+
+      - name: Sanity start
+        # Boot the binary, confirm /health responds, stop it. Catches missing
+        # runtime DLLs/shared libs and CPU baseline mistakes on each platform.
+        shell: bash
+        run: |
+          ORCHESTRA_PORT=8101 ./bin/${{ matrix.artifact }} &
+          PID=$!
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8101/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8101/health
+          curl -fsS http://127.0.0.1:8101/api/system
+          kill $PID || true
 
       # We upload both binaries under a single artifact to keep the download
       # step on the release side simple. Names still end up distinct on the

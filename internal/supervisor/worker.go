@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -153,7 +154,11 @@ func (w *Worker) Spawn() (err error) {
 	bin := w.opts.WorkerBinary
 	if bin == "" {
 		selfDir, _ := os.Executable()
-		bin = filepath.Join(filepath.Dir(selfDir), "orchestra-worker")
+		name := "orchestra-worker"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		bin = filepath.Join(filepath.Dir(selfDir), name)
 	}
 	if _, err := os.Stat(bin); err != nil {
 		w.mu.Unlock()

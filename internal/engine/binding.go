@@ -6,6 +6,8 @@ package engine
 #cgo CFLAGS: -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/tools/mtmd
 #cgo CXXFLAGS: -std=c++17 -I${SRCDIR}/../../llama.cpp/include -I${SRCDIR}/../../llama.cpp/ggml/include -I${SRCDIR}/../../llama.cpp/common -I${SRCDIR}/../../llama.cpp/tools/mtmd -I${SRCDIR}/../../llama.cpp/vendor
 #cgo LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/common -L${SRCDIR}/../../llama.cpp/build/tools/mtmd -L${SRCDIR}/../../llama.cpp/build/src -L${SRCDIR}/../../llama.cpp/build/ggml/src -lllama-common -lllama-common-base -lmtmd -lllama -lggml -lggml-base -lggml-cpu -lstdc++ -lm
+#cgo linux LDFLAGS: -fopenmp
+#cgo windows LDFLAGS: -static
 #cgo darwin LDFLAGS: -L${SRCDIR}/../../llama.cpp/build/ggml/src/ggml-metal -L${SRCDIR}/../../llama.cpp/build/ggml/src/ggml-blas -lggml-metal -lggml-blas -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 #include "llama_bridge.h"
 #include <stdlib.h>

@@ -10,6 +10,15 @@ BUILD_DIR = bin
 INSTALL_DIR ?= $(HOME)/.orchestra/bin
 LLAMA_DIR = llama.cpp
 LLAMA_BUILD_DIR = build/llama
+# Extra cmake flags for llama.cpp, e.g. portable CPU baselines for releases:
+#   make build-cpu LLAMA_CMAKE_EXTRA="-DGGML_NATIVE=OFF -DGGML_AVX2=ON"
+LLAMA_CMAKE_EXTRA ?=
+
+ifeq ($(OS),Windows_NT)
+EXE = .exe
+else
+EXE =
+endif
 
 # Default target
 .PHONY: all
@@ -83,8 +92,14 @@ llama-cpu: llama-prepare
 		-DLLAMA_BUILD_SERVER=OFF \
 		-DLLAMA_CURL=OFF \
 		-DLLAMA_OPENSSL=OFF \
-		-DCMAKE_BUILD_TYPE=Release
+		-DCMAKE_BUILD_TYPE=Release \
+		$(LLAMA_CMAKE_EXTRA)
 	cd $(LLAMA_DIR) && cmake --build build --config Release -j4
+ifeq ($(OS),Windows_NT)
+	# MinGW builds name ggml archives without the "lib" prefix (ggml.a), which
+	# -lggml cannot find. Add prefixed copies for the cgo linker.
+	cd $(GGML_LIB_DIR) && for f in ggml*.a; do cp -f "$$f" "lib$$f"; done
+endif
 	@echo "llama.cpp built successfully (CPU)"
 
 # --- Go build targets ---
@@ -106,7 +121,13 @@ GGML_BLAS = $(shell pwd)/$(GGML_BLAS_DIR)
 GGML_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/ggml/include
 COMMON_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/common
 VENDOR_INCLUDE = $(shell pwd)/$(LLAMA_DIR)/vendor
+ifeq ($(OS),Windows_NT)
+# Under MSYS2 `pwd` yields /d/a/... paths native gcc cannot open; the include
+# paths are already set by the #cgo directives in internal/engine/binding.go.
+BASE_CGO = CGO_ENABLED=1
+else
 BASE_CGO = CGO_ENABLED=1 CGO_CFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE)" CGO_CXXFLAGS="-I$(LLAMA_INCLUDE) -I$(GGML_INCLUDE) -I$(COMMON_INCLUDE) -I$(VENDOR_INCLUDE)"
+endif
 BASE_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -lllama-common -lllama-common-base -lllama -lggml -lstdc++ -lm
 METAL_LDFLAGS = -L$(COMMON_LIB) -L$(LLAMA_LIB) -L$(GGML_LIB) -L$(GGML_METAL) -L$(GGML_BLAS) -lllama-common -lllama-common-base -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lggml-blas -lstdc++ -lm -framework Accelerate -framework Metal -framework MetalKit -framework Foundation
 TEST_LDFLAGS = $(BASE_LDFLAGS)
@@ -114,8 +135,8 @@ ifeq ($(shell uname -s),Darwin)
 TEST_LDFLAGS = $(METAL_LDFLAGS)
 endif
 GO_LDFLAGS = -s -w -X main.version=$(VERSION) -X main.buildCommit=$(BUILD_COMMIT) -X main.llamaCppCommit=$(LLAMA_CPP_COMMIT)
-GO_BUILD = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/server
-GO_BUILD_WORKER = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(WORKER_BINARY) ./cmd/worker
+GO_BUILD = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)$(EXE) ./cmd/server
+GO_BUILD_WORKER = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(WORKER_BINARY)$(EXE) ./cmd/worker
 
 # HOST binary (./cmd/server) does NOT need CGo in subprocess mode. We still
 # link against llama.cpp for in-process mode (the default) so users keep the
