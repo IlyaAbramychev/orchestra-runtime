@@ -224,3 +224,108 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # After the Release: the channel manifest the apps read, and the operium.ru
+  # mirror they download from. The manifest used to be a separate, manual
+  # workflow (runtime-channel-manifest.yml, still there for re-publishing an
+  # old tag), so a tag produced binaries no app was told about.
+  #
+  # The channel comes from the tag: vX.Y.Z-canary… → canary, -beta…/-rc… →
+  # beta, a plain vX.Y.Z → stable. To verify on canary or beta first, tag with
+  # the suffix, then tag the plain version once it is good.
+  #
+  # The mirror needs the OPERIUM_DEPLOY_SSH_KEY secret. Its public half is on
+  # the server as
+  #   command="rrsync -wo /home/operium/operium-core/desktop-releases",restrict ssh-ed25519 …
+  # so it can only write files under desktop-releases/ (paths below are
+  # relative to it) and cannot open a shell. Without the secret the manifest
+  # is still committed and the apps download from GitHub.
+  manifest:
+    name: Channel manifest and operium.ru mirror
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DEPLOY_KEY: ${{ secrets.OPERIUM_DEPLOY_SSH_KEY }}
+      SERVER: operium@157.22.194.113
+      PUBLIC_URL: https://operium.ru/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Channel from the tag
+        run: |
+          case "$TAG" in
+            *-canary*) channel=canary ;;
+            *-beta*|*-rc*) channel=beta ;;
+            *) channel=stable ;;
+          esac
+          echo "CHANNEL=$channel" >> "$GITHUB_ENV"
+          echo "Channel: $channel"
+
+      - name: Download the release
+        run: |
+          gh release download "$TAG" \
+            --pattern 'orchestra-runtime-*' \
+            --pattern 'orchestra-worker-*' \
+            --dir release-assets
+          ls -la release-assets
+          gh release view "$TAG" --json name --jq .name > release-name.txt
+
+      - name: Manifest for GitHub downloads
+        run: |
+          node scripts/generate-runtime-manifest.mjs \
+            --channel "$CHANNEL" \
+            --version "$TAG" \
+            --artifacts-dir release-assets \
+            --base-url https://github.com/${{ github.repository }}/releases/download \
+            --min-extension-version 0.2.13 \
+            --notes "$(cat release-name.txt)" \
+            --output "release-manifests/$CHANNEL.json"
+
+      - name: Commit it to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "release-manifests/$CHANNEL.json"
+          if git diff --cached --quiet; then
+            echo "Manifest unchanged."
+          else
+            git commit -m "release: $CHANNEL manifest for $TAG"
+            git push origin HEAD:main
+          fi
+
+      - name: Mirror to operium.ru
+        if: env.DEPLOY_KEY != ''
+        run: |
+          node scripts/generate-runtime-manifest.mjs \
+            --channel "$CHANNEL" \
+            --version "$TAG" \
+            --artifacts-dir release-assets \
+            --base-url "$PUBLIC_URL/updates/runtime" \
+            --min-extension-version 0.2.13 \
+            --notes "$(cat release-name.txt)" \
+            --output "operium/$CHANNEL.json"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/operium
+          chmod 600 ~/.ssh/operium
+          ssh-keyscan -H "${SERVER#*@}" >> ~/.ssh/known_hosts
+          export RSYNC_RSH="ssh -i $HOME/.ssh/operium -o IdentitiesOnly=yes"
+          # Binaries first, the manifest last: an app must never read a
+          # manifest that points at a file not uploaded yet.
+          rsync -rt --mkpath release-assets/ "$SERVER:updates/runtime/$TAG/"
+          rsync -t --mkpath "operium/$CHANNEL.json" "$SERVER:download/runtime/$CHANNEL.json"
+          version="${TAG#v}"
+          curl -fsS "$PUBLIC_URL/download/runtime/$CHANNEL.json" | grep -q "\"runtimeVersion\": \"$version\""
+          for file in release-assets/*; do
+            curl -fsSI "$PUBLIC_URL/updates/runtime/$TAG/$(basename "$file")" > /dev/null
+          done
+          echo "Mirrored $TAG to $PUBLIC_URL (channel $CHANNEL)."
