@@ -1,22 +1,52 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "releasedAt": "2026-09-22T10:15:16.314Z",
-  "runtimeVersion": "0.5.0",
+  "releasedAt": "2026-09-25T14:20:26.185Z",
+  "runtimeVersion": "0.5.1",
   "minExtensionVersion": "0.2.13",
   "maxExtensionVersion": "0.x",
   "critical": false,
-  "notes": "Runtime 0.5.0: fixed VLM prefill, adaptive loading, per-request load profiles and native reasoning/tool reliability. Install matching host and worker.",
+  "notes": "v0.5.1",
   "artifacts": [
     {
       "platform": "darwin",
       "arch": "arm64",
-      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.0/orchestra-runtime-darwin-arm64",
-      "sha256": "ceacc0098c37f54487211dc649b885d19a770cbcf3ae9acc9e5797fa754e9041",
-      "size": 15878402,
-      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.0/orchestra-worker-darwin-arm64",
-      "workerSha256": "8b8db4fc74c34e22aad6ba18085492ae56168dcb4b7fc93b132c43472c0c123c",
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-runtime-darwin-arm64",
+      "sha256": "cd321ca1165a03cd98dc9f3000491611b95d3fa5b6288c9a3bff67e47d811f1c",
+      "size": 15894994,
+      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-worker-darwin-arm64",
+      "workerSha256": "65f473d17581cb31f5e4183bf06a6bbb6df667593ea6ebe852f3fb5f7dfabb80",
       "workerSize": 10812690
+    },
+    {
+      "platform": "linux",
+      "arch": "arm64",
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-runtime-linux-arm64",
+      "sha256": "5709b0f849ca01f2e7a034c9791f1fe96065be6a0287df8bb11cfbad888d8de1",
+      "size": 14903424,
+      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-worker-linux-arm64",
+      "workerSha256": "2de691654e057c0a9cf47bbc0c08159dcacef6463e5b0a519a1e6a0ba6bae270",
+      "workerSize": 9851864
+    },
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-runtime-linux-x64",
+      "sha256": "ab346a8beca6ea8c5f54df886d856a6069ce3708c82653cede9a80c6e26d5cd6",
+      "size": 16280216,
+      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-worker-linux-x64",
+      "workerSha256": "39a95da7555ed3de02fad20a3241f9d02fe75e93b53301e1e5c91b8fd37c9abe",
+      "workerSize": 10884848
+    },
+    {
+      "platform": "win32",
+      "arch": "x64",
+      "url": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-runtime-win32-x64.exe",
+      "sha256": "497e9397df3a5e35ab1d170fa5a5288d10b81edcba3a91f3c46c5d827da34b03",
+      "size": 17779200,
+      "workerUrl": "https://github.com/IlyaAbramychev/orchestra-runtime/releases/download/v0.5.1/orchestra-worker-win32-x64.exe",
+      "workerSha256": "407e37ec817fa9fc36d634e329cf28fd079575c5c55f8914b28c9388762782ec",
+      "workerSize": 12294144
     }
   ]
 }
