@@ -136,7 +136,7 @@ jobs:
 
       - name: Install Vulkan runtime (Linux)
         if: runner.os == 'Linux' && matrix.vulkan
-        run: sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+        run: sudo apt-get install -y libvulkan1 libvulkan-dev mesa-vulkan-drivers
 
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
