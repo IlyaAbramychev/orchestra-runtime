@@ -90,6 +90,13 @@ func (s *Server) Start() error {
 	s.scheduler = scheduler
 	modelMgr := service.NewModelManagerWithScheduler(registry, scheduler, s.cfg.ModelsDir)
 	modelMgr.SetDefaultLoadOptions(defaultLoadOptionsFromConfig(s.cfg))
+	// Pick up .gguf files the user copied into the models folder by hand;
+	// otherwise only models listed in registry.json are visible.
+	if res, err := modelMgr.ScanModelsDir(); err != nil {
+		slog.Warn("models dir scan failed", "dir", s.cfg.ModelsDir, "error", err)
+	} else if len(res.Imported) > 0 || len(res.Issues) > 0 {
+		slog.Info("models dir scanned", "dir", s.cfg.ModelsDir, "imported", len(res.Imported), "issues", len(res.Issues))
+	}
 	// Read GGUF headers of every registered model now, so the first
 	// /api/tags or /api/models request does not pay for a cold metadata cache.
 	go modelMgr.List()
@@ -97,6 +104,7 @@ func (s *Server) Start() error {
 	inferSvc.SetModelLoader(modelMgr)
 	sysInfo := service.NewSystemInfo(s.backend)
 	sysInfo.SetScheduler(scheduler)
+	sysInfo.SetModelsDir(s.cfg.ModelsDir)
 	go sysInfo.RefreshHardware()
 
 	embedSvc := service.NewEmbeddingServiceWithScheduler(scheduler)

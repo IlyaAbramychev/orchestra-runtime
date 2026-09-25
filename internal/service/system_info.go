@@ -2,6 +2,7 @@ package service
 
 import (
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -65,6 +66,8 @@ type SystemInfo struct {
 	hwMaxAge     time.Duration
 	hwRefreshing bool
 	sampleHW     func() hwSample
+
+	modelsDir string
 }
 
 func NewSystemInfo(eng engine.Backend) *SystemInfo {
@@ -92,6 +95,14 @@ func (s *SystemInfo) RefreshHardware() {
 	s.hwCache = sample
 	s.hwRefreshing = false
 	s.hwMu.Unlock()
+}
+
+// SetModelsDir records the models directory reported by /api/system.
+func (s *SystemInfo) SetModelsDir(dir string) {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	s.modelsDir = dir
 }
 
 func (s *SystemInfo) SetScheduler(scheduler *RuntimeScheduler) {
@@ -170,6 +181,7 @@ func (s *SystemInfo) GetInfo(queueDepth int) *model.SystemInfoResponse {
 		TotalRAM:           totalRAM,
 		AvailableRAM:       availableRAM,
 		GPU:                gpu,
+		ModelsDir:          s.modelsDir,
 	}
 
 	if currentModelID != "" {
