@@ -11,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"syscall"
 )
 
 // ggml_log_level values from ggml.h.
@@ -40,9 +39,8 @@ func installNativeLogger() {
 		slog.Warn("native log capture disabled", "error", err)
 		return
 	}
-	// Fd() switches the descriptor to blocking mode, so set non-blocking after.
-	fd := int(w.Fd())
-	if err := syscall.SetNonblock(fd, true); err != nil {
+	fd, err := nativeLogWriteFD(w)
+	if err != nil {
 		slog.Warn("native log capture disabled", "error", err)
 		_ = r.Close()
 		_ = w.Close()
