@@ -102,6 +102,33 @@ ifeq ($(OS),Windows_NT)
 endif
 	@echo "llama.cpp built successfully (CPU)"
 
+# Vulkan: one graphics build for NVIDIA, AMD and Intel on Windows and Linux.
+# It links the Vulkan loader, which comes with the graphics driver; with no
+# usable GPU llama.cpp computes on the processor as the CPU build does.
+# Needs the Vulkan headers and glslc (shaderc) to build.
+.PHONY: llama-vulkan
+llama-vulkan: llama-prepare
+	@echo "Building llama.cpp with Vulkan backend..."
+	cd $(LLAMA_DIR) && cmake -B build \
+		-DGGML_VULKAN=ON \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DLLAMA_BUILD_TESTS=OFF \
+		-DLLAMA_BUILD_EXAMPLES=OFF \
+		-DLLAMA_BUILD_TOOLS=OFF \
+		-DLLAMA_BUILD_APP=OFF \
+		-DLLAMA_BUILD_MTMD=ON \
+		-DLLAMA_BUILD_SERVER=OFF \
+		-DLLAMA_CURL=OFF \
+		-DLLAMA_OPENSSL=OFF \
+		-DCMAKE_BUILD_TYPE=Release \
+		$(LLAMA_CMAKE_EXTRA)
+	cd $(LLAMA_DIR) && cmake --build build --config Release -j4
+ifeq ($(OS),Windows_NT)
+	cd $(GGML_LIB_DIR) && for f in ggml*.a; do cp -f "$$f" "lib$$f"; done
+	cd $(GGML_LIB_DIR)/ggml-vulkan && for f in ggml*.a; do cp -f "$$f" "lib$$f"; done
+endif
+	@echo "llama.cpp built successfully (Vulkan)"
+
 # --- Go build targets ---
 
 # Detect llama.cpp library paths (cmake output structure varies)
@@ -135,8 +162,10 @@ ifeq ($(shell uname -s),Darwin)
 TEST_LDFLAGS = $(METAL_LDFLAGS)
 endif
 GO_LDFLAGS = -s -w -X main.version=$(VERSION) -X main.buildCommit=$(BUILD_COMMIT) -X main.llamaCppCommit=$(LLAMA_CPP_COMMIT)
-GO_BUILD = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)$(EXE) ./cmd/server
-GO_BUILD_WORKER = go build -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(WORKER_BINARY)$(EXE) ./cmd/worker
+# Build tags per backend (vulkan adds its libraries, see engine/binding_vulkan.go).
+GO_TAGS ?=
+GO_BUILD = go build $(GO_TAGS) -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)$(EXE) ./cmd/server
+GO_BUILD_WORKER = go build $(GO_TAGS) -ldflags="$(GO_LDFLAGS)" -o $(BUILD_DIR)/$(WORKER_BINARY)$(EXE) ./cmd/worker
 
 # HOST binary (./cmd/server) does NOT need CGo in subprocess mode. We still
 # link against llama.cpp for in-process mode (the default) so users keep the
@@ -160,6 +189,15 @@ build-cuda: llama-cuda
 	mkdir -p $(BUILD_DIR)
 	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS) -lcuda -lcudart" $(GO_BUILD)
 	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS) -lcuda -lcudart" $(GO_BUILD_WORKER)
+	@echo "Built: $(BUILD_DIR)/$(BINARY) + $(BUILD_DIR)/$(WORKER_BINARY)"
+
+.PHONY: build-vulkan
+build-vulkan: GO_TAGS = -tags vulkan
+build-vulkan: llama-vulkan
+	@echo "Building $(BINARY) + $(WORKER_BINARY) (Vulkan)..."
+	mkdir -p $(BUILD_DIR)
+	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS)" $(GO_BUILD)
+	$(BASE_CGO) CGO_LDFLAGS="$(BASE_LDFLAGS)" $(GO_BUILD_WORKER)
 	@echo "Built: $(BUILD_DIR)/$(BINARY) + $(BUILD_DIR)/$(WORKER_BINARY)"
 
 .PHONY: build-cpu

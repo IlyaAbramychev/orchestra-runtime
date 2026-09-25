@@ -10,6 +10,8 @@ name: Release
 #   orchestra-runtime-linux-x64        CPU (AVX2 baseline), glibc >= 2.35
 #   orchestra-runtime-linux-arm64      CPU (armv8 baseline), glibc >= 2.35
 #   orchestra-runtime-win32-x64.exe    CPU (AVX2 baseline), MinGW static link
+#   orchestra-runtime-linux-x64-vulkan      graphics (Vulkan): NVIDIA, AMD, Intel
+#   orchestra-runtime-win32-x64-vulkan.exe  graphics (Vulkan), needs the driver's vulkan-1.dll
 #   + the matching orchestra-worker-* binary for subprocess mode
 #
 # Pull requests that touch the build run the same matrix without publishing,
@@ -82,6 +84,26 @@ jobs:
             ext: ".exe"
             artifact: orchestra-runtime-win32-x64.exe
             worker_artifact: orchestra-worker-win32-x64.exe
+          # Graphics builds. Vulkan runs on NVIDIA, AMD and Intel through the
+          # driver the card already has, and falls back to the processor
+          # without a usable GPU. The app picks them when a Vulkan loader is
+          # present (Settings → Hardware → Model compute).
+          - name: linux-x64-vulkan
+            runner: ubuntu-22.04
+            make_target: build-vulkan
+            vulkan: true
+            cmake_extra: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON"
+            ext: ""
+            artifact: orchestra-runtime-linux-x64-vulkan
+            worker_artifact: orchestra-worker-linux-x64-vulkan
+          - name: win32-x64-vulkan
+            runner: windows-2022
+            make_target: build-vulkan
+            vulkan: true
+            cmake_extra: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON"
+            ext: ".exe"
+            artifact: orchestra-runtime-win32-x64-vulkan.exe
+            worker_artifact: orchestra-worker-win32-x64-vulkan.exe
 
     steps:
       - name: Checkout (with llama.cpp submodule)
@@ -102,6 +124,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential
 
+      # glslc compiles llama.cpp's shaders; the SDK also brings the headers
+      # and loader. Mesa's lavapipe is a software Vulkan device, so the sanity
+      # start below exercises the Vulkan path on a runner without a GPU.
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux' && matrix.vulkan
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Install Vulkan runtime (Linux)
+        if: runner.os == 'Linux' && matrix.vulkan
+        run: sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -113,6 +149,7 @@ jobs:
       # rather than MSVC. path-type inherit keeps setup-go's `go` on PATH.
       - name: Install build deps (Windows)
         if: runner.os == 'Windows'
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -123,6 +160,8 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-shaderc
 
       - name: Derive version
         id: ver
@@ -158,6 +197,13 @@ jobs:
         # runtime DLLs/shared libs and CPU baseline mistakes on each platform.
         shell: bash
         run: |
+          # A graphics build needs vulkan-1.dll, which on a user's machine
+          # comes with the graphics driver. The runner has none, so MSYS2's
+          # loader stands in — copied beside the binary for this check only;
+          # it is not part of the uploaded artifact.
+          if [[ "${{ matrix.vulkan }}" == "true" && "${{ runner.os }}" == "Windows" ]]; then
+            cp "$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/ucrt64/bin/vulkan-1.dll" bin/
+          fi
           ORCHESTRA_PORT=8101 ./bin/${{ matrix.artifact }} &
           PID=$!
           for i in $(seq 1 30); do

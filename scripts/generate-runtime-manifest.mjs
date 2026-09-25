@@ -28,13 +28,15 @@ function assertRequired(value, name) {
 function parseArtifactName(fileName) {
   // orchestra-runtime-darwin-arm64
   // orchestra-runtime-win32-x64.exe
+  // orchestra-runtime-win32-x64-vulkan.exe   (a graphics build: `variant`)
   const noExt = fileName.replace(/\.exe$/i, '');
-  const m = noExt.match(/^orchestra-(runtime|worker)-(darwin|linux|win32)-(arm64|x64)$/i);
+  const m = noExt.match(/^orchestra-(runtime|worker)-(darwin|linux|win32)-(arm64|x64)(?:-(vulkan|cuda))?$/i);
   if (!m) return null;
   return {
     kind: m[1].toLowerCase(),
     platform: m[2].toLowerCase(),
     arch: m[3].toLowerCase(),
+    variant: m[4] ? m[4].toLowerCase() : null,
   };
 }
 
@@ -74,10 +76,11 @@ async function main() {
     if (!parsed) continue;
     const abs = path.join(artifactsDir, fileName);
     const stat = await fs.stat(abs);
-    const target = `${parsed.platform}/${parsed.arch}`;
+    const target = `${parsed.platform}/${parsed.arch}/${parsed.variant ?? ''}`;
     const artifact = artifactsByTarget.get(target) ?? {
       platform: parsed.platform,
       arch: parsed.arch,
+      ...(parsed.variant ? { variant: parsed.variant } : {}),
     };
     if (parsed.kind === 'runtime') {
       artifact.url = `${baseUrl}/${releaseTag}/${fileName}`;
@@ -91,7 +94,11 @@ async function main() {
     artifactsByTarget.set(target, artifact);
   }
 
-  const artifacts = [...artifactsByTarget.values()].filter((artifact) => artifact.url);
+  // The plain build of a platform first: apps that predate variants take the
+  // first entry for their platform, and it must be the one that runs anywhere.
+  const artifacts = [...artifactsByTarget.values()]
+    .filter((artifact) => artifact.url)
+    .sort((a, b) => Number(Boolean(a.variant)) - Number(Boolean(b.variant)));
 
   if (artifacts.length === 0) {
     throw new Error(
@@ -100,7 +107,7 @@ async function main() {
   }
   const incompleteTargets = artifacts
     .filter((artifact) => !artifact.workerUrl || !artifact.workerSha256)
-    .map((artifact) => `${artifact.platform}/${artifact.arch}`);
+    .map((artifact) => `${artifact.platform}/${artifact.arch}${artifact.variant ? `/${artifact.variant}` : ''}`);
   if (incompleteTargets.length > 0) {
     throw new Error(
       `Missing worker artifact for: ${incompleteTargets.join(', ')}. ` +

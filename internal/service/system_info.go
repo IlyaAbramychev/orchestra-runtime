@@ -275,6 +275,22 @@ func getAvailableRAM() int64 {
 }
 
 func detectGPU() *model.GPUInfo {
+	// A graphics build reports what llama.cpp itself will offload to.
+	if engine.BuildBackend() != "" {
+		if devices := engine.GPUDevices(); len(devices) > 0 {
+			device := devices[0]
+			name := device.Description
+			if name == "" {
+				name = device.Name
+			}
+			return &model.GPUInfo{
+				Name:      name,
+				TotalVRAM: int64(device.TotalBytes),
+				FreeVRAM:  int64(device.FreeBytes),
+				Backend:   strings.ToLower(device.Backend),
+			}
+		}
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		if runtime.GOARCH == "arm64" {
