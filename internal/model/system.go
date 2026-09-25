@@ -18,6 +18,10 @@ type SystemInfoResponse struct {
 	QueueDepth     int      `json:"queue_depth"`
 	// IdleTimeoutSeconds: auto-unload timer in seconds (0 = disabled).
 	IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+	// ModelsDir is the absolute models directory this process serves, so
+	// clients can tell whether an already running runtime uses the folder
+	// they expect.
+	ModelsDir string `json:"models_dir,omitempty"`
 }
 
 type RuntimeStatusResponse struct {

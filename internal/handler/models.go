@@ -55,7 +55,8 @@ func (h *ModelsHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // Import handles POST /api/models/import.
-// Body: {"path": "/path/to/directory"} — scans and registers all .gguf files found.
+// Body: {"path": "/path/to/directory"} — scans and registers all .gguf files found,
+// following symlinks. Unreadable entries are returned in "errors".
 func (h *ModelsHandler) Import(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -69,21 +70,28 @@ func (h *ModelsHandler) Import(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := h.manager.ImportFromDirectory(req.Path)
+	res, err := h.manager.ImportFromDirectoryDetailed(req.Path)
 	if err != nil {
 		slog.Error("import models failed", "path", req.Path, "error", err)
 		writeRuntimeError(w, err)
 		return
 	}
 
-	result := make([]model.ModelInfo, 0, len(entries))
-	for _, e := range entries {
+	result := make([]model.ModelInfo, 0, len(res.Imported))
+	for _, e := range res.Imported {
 		result = append(result, toModelInfo(e))
 	}
+	issues := res.Issues
+	if issues == nil {
+		issues = []service.ImportIssue{}
+	}
 
+	// "errors" lists folders/files that could not be read (permission
+	// denied, broken symlinks), so the UI can explain why a model is missing.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"imported": len(result),
 		"models":   result,
+		"errors":   issues,
 	})
 }
 
